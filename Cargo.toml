@@ -1,6 +1,6 @@
 [package]
 name = "shui"
-version = "0.1.0-rc.10"
+version = "0.1.0-rc.11"
 edition = "2024"
 build = "scripts/build.rs"
 license = "GPL-3.0-only"
