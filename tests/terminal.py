@@ -294,10 +294,11 @@ def interaction_checks(binary):
                 # Uppercase Shift+Alt is a distinct shortcut, not Alt+Z.
                 tui.send(b"\x1b[57443;3u")
                 tui.send(b"\x1b[57441;4u")
-                tui.send(b"\x1b[90;4u")
-                tui.require(tui.process.poll() is None, "Shift+Alt+Z launched Alt+Z")
-                tui.require("Alt+Shift" in tui.footer() and "Zero" not in tui.footer(),
-                            "Shift+Alt offered Alt-only profile")
+                for shifted in (b"\x1b[90;4u", b"\x1b[122:90;4u"):
+                    tui.send(shifted)
+                    tui.require(tui.process.poll() is None, "Shift+Alt+Z launched Alt+Z")
+                    tui.require("Alt+Shift" in tui.footer() and "Zero" not in tui.footer(),
+                                "Shift+Alt offered Alt-only profile")
                 tui.send(b"\x1b[57441;4:3u")
                 tui.send(b"\x1b[57442;7u")
                 tui.send(b"\x1b[122;7u")
@@ -477,6 +478,19 @@ with tempfile.TemporaryDirectory(prefix="shui-pty-") as directory:
 
     session([b"\x1b[3~", b"ALPHA", "я".encode(), b"\x1b[3~", b"\r"])  # Delete on empty filter and a Unicode character
     assert (root / "command").read_text().splitlines()[1:] == ["--", "alpha"]
+    # Enhanced text reports base and shifted codepoints. Exercise both editable
+    # remote fields through Crossterm, including repeat/release and held Shift.
+    shifted_remote = [
+        b"\x1b[57441;2u", b"\x1b[117:85;2u", b"\x1b[117:85;2:3u",
+        b"\x1b[57441;2:3u", b"ser", b"\x1b[50:64;2u",
+        b"shift-input.invalid", b"\x1b[59:58;2u", b"222",
+        b"\x1b[50;1:2u", b"\x1b[50;1:3u",
+    ]
+    for prefix in ([], [ADD_REMOTE]):
+        output = session([*prefix, *shifted_remote, b"\r"])
+        assert b"\x1b[>15u" in output, "shifted key reporting was not requested"
+        assert (root / "command").read_text().splitlines()[1:] == [
+            "-p", "2222", "--", "User@shift-input.invalid"]
     session([b"beta:2222", b"\x1b[19~", b"\r"])  # F8: SSH to Mosh
     command = (root / "command").read_text().splitlines()
     assert command[0].endswith("/mosh"), command

@@ -860,6 +860,9 @@ fn keyboard_enhancements(output: &mut impl Write, enable: bool) -> io::Result<()
                 PushKeyboardEnhancementFlags(
                     KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                         | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                        // All-key reporting otherwise supplies unshifted key codes,
+                        // losing text such as uppercase letters, @, and :.
+                        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
                         | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
                 )
             )
@@ -1154,7 +1157,7 @@ mod tests {
         if cfg!(windows) {
             assert!(output.is_empty());
         } else {
-            assert_eq!(output, b"\x1b[>11u\x1b[<1u");
+            assert_eq!(output, b"\x1b[>15u\x1b[<1u");
         }
     }
     #[test]

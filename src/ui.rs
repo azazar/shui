@@ -19,7 +19,17 @@ impl Terminal for DefaultTerminal {
     }
 
     fn read(&mut self) -> io::Result<Event> {
-        event::read()
+        let mut event = event::read()?;
+        // On Unix, Crossterm consumes Shift when decoding alternate key codes.
+        // Restore it for uppercase letters, as its legacy text parser does, so
+        // Shift+Alt+letter cannot accidentally activate Alt+letter shortcuts.
+        if cfg!(not(windows))
+            && let Event::Key(key) = &mut event
+            && matches!(key.code, KeyCode::Char(c) if c.is_uppercase())
+        {
+            key.modifiers.insert(KeyModifiers::SHIFT);
+        }
+        Ok(event)
     }
 
     fn edit_config(&mut self, home: &Path) -> io::Result<launch::Config> {
