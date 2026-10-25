@@ -174,6 +174,7 @@ fn defaults(scope: &str) -> Vec<(&'static str, &'static str, Vec<&'static str>)>
             ("connect_and_return", "Alt+Enter", vec!["Alt+Enter"]),
             ("next_field", "Tab", vec!["Tab", "Down"]),
             ("previous_field", "Shift+Tab", vec!["Shift+Tab", "Up"]),
+            ("toggle_recipe", "F6", vec!["Space"]),
         ]),
         "help" => result.extend([
             ("close", "Esc", vec!["Esc", "Ctrl+C", "Q"]),
@@ -299,8 +300,22 @@ impl Bindings {
         text
     }
     pub fn translate(&self, scope: &str, event: KeyEvent) -> Option<KeyEvent> {
+        self.translate_context(scope, event, false)
+    }
+    pub fn translate_dialog(&self, event: KeyEvent, recipe_selector: bool) -> Option<KeyEvent> {
+        self.translate_context("dialog", event, recipe_selector)
+    }
+    fn translate_context(
+        &self,
+        scope: &str,
+        event: KeyEvent,
+        recipe_selector: bool,
+    ) -> Option<KeyEvent> {
         let key = Key::from_event(event);
         for (action, canonical, fallback) in defaults(scope) {
+            if action == "toggle_recipe" && !recipe_selector {
+                continue;
+            }
             if self.keys(scope, action, &fallback).contains(&key) {
                 return Some(Key::try_from(canonical.to_owned()).unwrap().event());
             }
@@ -327,7 +342,12 @@ impl Bindings {
             let mut used = HashSet::new();
             for (action, _, fallback) in defaults(scope) {
                 for key in self.keys(scope, action, &fallback) {
-                    if scope != "help" && key.typing() {
+                    if scope != "help"
+                        && key.typing()
+                        && !(scope == "dialog"
+                            && action == "toggle_recipe"
+                            && key.code == KeyCode::Char(' '))
+                    {
                         return Err(format!(
                             "{scope}.{action}: unmodified text keys are reserved for typing"
                         ));

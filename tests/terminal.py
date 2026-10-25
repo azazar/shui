@@ -208,30 +208,38 @@ def interaction_checks(binary):
         for rows, cols in [(24, 100), (16, 65), (9, 40), (6, 26)]:
             with ScreenSession(rows, cols) as tui:
                 tui.normal_bar()
-                tui.send(b"\x1bOS")  # Configure the selected host, focused on Setup.
-                tui.require("Setup" in tui.selected()[1], "F4 did not focus the recipe")
+                tui.send(b"\x1bOS")
+                tui.require("[ ]" in tui.selected()[1] and "Zero" in tui.selected()[1], "F4 did not focus the first checkbox")
                 anchors = {label: tui.locate(label)
-                           for label in ("REMOTE SETUP", "Action", "Remote", "Setup")}
-                footer = tui.locate("Cancel")
+                           for label in ("REMOTE SETUP",)}
                 tui.send(b"\r")  # Validation errors use the reserved status area.
                 for label, position in anchors.items():
                     tui.require(tui.locate(label) == position, f"validation moved {label}")
-                for name in ("Zero", "One", "Many", "None"):
-                    tui.send(b"\x1b[C")
-                    tui.require(name in tui.selected()[1], f"recipe {name} not selected")
-                    for label, position in anchors.items():
-                        tui.require(tui.locate(label) == position, f"{label} moved for {name}")
-                    tui.require(tui.locate("Cancel") == footer, f"footer moved for {name}")
-                # Inputs must scroll into view without moving the dialog itself.
-                tui.send(b"\x1b[D")  # None -> Many.
+                tui.focus("One")
+                tui.send(b" ")
+                tui.focus("Many")
+                tui.send(b" ")
+                if rows == 24:
+                    visible = "\n".join(tui.screen.display)
+                    tui.require(visible.count("first-value") == 2 and "fourth-value" in visible,
+                                "selected recipes' options are not visible together")
+                    tui.send(b" ")
+                    visible = "\n".join(tui.screen.display)
+                    tui.require(visible.count("first-value") == 1 and "fourth-value" not in visible,
+                                "unchecking did not hide only that recipe's options")
+                    tui.send(b" ")
+                # Both selected recipes retain their visible input rows.
+                tui.focus("One")
+                tui.send(b"\t")
+                tui.require("first-value" in tui.selected()[1], "first recipe options disappeared")
                 tui.focus("fourth")
                 tui.require("fourth-value" in tui.selected()[1], "last input obscured")
                 tui.require(tui.locate("REMOTE SETUP") == anchors["REMOTE SETUP"],
                             "scrolling fields moved the header")
-                tui.focus("Setup")
+                tui.focus("Many")
                 tui.send(b"\x1bOP")  # Help returns to the same field and geometry.
                 tui.send(b"\x1bOP")
-                tui.require("Setup" in tui.selected()[1], "help lost form focus")
+                tui.require("Many" in tui.selected()[1], "help lost form focus")
                 tui.require(tui.locate("REMOTE SETUP") == anchors["REMOTE SETUP"],
                             "help moved the dialog")
                 tui.send(b"\x1b")
@@ -255,10 +263,10 @@ def interaction_checks(binary):
             before = tui.selected()
             tui.send(b"\x1b[C")
             tui.require(tui.selected() == before, "Right changed the editable Remote")
-            tui.focus("Setup")
-            tui.require("Choice" in tui.screen.display[footer_row], "recipe omitted Choice")
-            tui.send(b"\x1b[C")
-            tui.require("Zero" in tui.selected()[1], "advertised recipe choice did not work")
+            tui.focus("Zero")
+            tui.require("Queue" in tui.screen.display[footer_row], "recipe omitted checkbox action")
+            tui.send(b" ")
+            tui.require("[x]" in tui.selected()[1] and "Zero" in tui.selected()[1], "checkbox did not toggle")
 
         # Modifier groups are exact. A release keeps the remaining held modifier,
         # and losing window focus resets stale state even if releases were missed.
@@ -641,22 +649,24 @@ profiles:
     assert config_file.read_text() == original_config
     session([b"beta:2222", b"\r"])
     assert (root / "command").read_text().splitlines()[0].endswith("/ssh")
-    # Exercise both shipped recipes with fake tools; no network or real dotfiles.
+    # Exercise the shipped key-auth and dotfiles recipes with fake tools.
     for name in ("ssh-copy-id", "scp"):
         stub = root / "bin" / name
         stub.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$SHUI_TEST_LOG.' + name + '"\n')
         stub.chmod(0o755)
-    session([ADD_REMOTE, b"setup@example.org:2200", b"\t", b"\x1b[C", b"\r"])
+    session([ADD_REMOTE, b"setup@example.org:2200", b"\t", b" ", b"\r"])
     assert (root / "command.ssh-copy-id").read_text().splitlines() == ["-p", "2200", "-i", str(root / ".ssh/id_ed25519.pub"), "setup@example.org"]
     (root / "src/dotfiles").mkdir(parents=True)
     (root / "src/dotfiles/install.sh").write_text("exit 0\n")
     ssh = root / "bin/ssh"
     original_ssh = ssh.read_text()
     ssh.write_text(original_ssh + 'printf "%s\\n" "$@" >> "$SHUI_TEST_LOG.calls"\n')
-    session([ADD_REMOTE, b"dotfiles@example.org:2201", b"\t", b"\x1b[C", b"\x1b[C", b"\r"])
-    assert (root / "command.ssh-copy-id").read_text().splitlines() == ["-p", "2201", "-i", str(root / ".ssh/id_ed25519.pub"), "dotfiles@example.org"]
-    assert (root / "command.scp").read_text().splitlines() == ["-P", "2201", "-i", str(root / ".ssh/id_ed25519"), "-r", str(root / "src/dotfiles") + "/.", "dotfiles@example.org:src/dotfiles/"]
-    assert 'exec "$2" "./$1"' in (root / "command.calls").read_text()
+    (root / "command.ssh-copy-id").unlink()
+    session([ADD_REMOTE, b"dotfiles@example.org:2201", b"\t", b"\t", b" ", b"\r"])
+    assert not (root / "command.ssh-copy-id").exists()
+    assert (root / "command.scp").read_text().splitlines() == ["-P", "2201", "-r", str(root / "src/dotfiles") + "/.", "dotfiles@example.org:src/dotfiles/"]
+    dotfiles_calls = (root / "command.calls").read_text()
+    assert "-i" not in dotfiles_calls.splitlines()
     ssh.write_text(original_ssh)
     # Adding a remote persists through ordinary history, even if no history existed.
     (root / ".bash_history").unlink()
@@ -678,12 +688,12 @@ configuration_scripts:
     command: setup-test %h %p %{value}
     value: literal ; $HOME
 """)
-    session([ADD_REMOTE, b"added:2222", b"\t", b"\x1b[C", b"\r"])
+    session([ADD_REMOTE, b"added:2222", b"\t", b" ", b"\r"])
     assert (root / "command.setup").read_text().splitlines() == ["added", "2222", "literal ; $HOME"]
     before = (root / ".bash_history").read_text()
     (root / "command").unlink()
     child_env["SETUP_EXIT"] = "7"
-    session([ADD_REMOTE, b"failed", b"\t", b"\x1b[C", b"\r"], expected_status=1)
+    session([ADD_REMOTE, b"failed", b"\t", b" ", b"\r"], expected_status=1)
     assert not (root / "command").exists()
     assert (root / ".bash_history").read_text() == before
     del child_env["SETUP_EXIT"]
@@ -691,14 +701,14 @@ configuration_scripts:
     before = (root / ".bash_history").read_text()
     config_before = (root / ".ssh/config").read_text()
     (root / "command").unlink(missing_ok=True)
-    output = session([b"added:2222", b"\x1bOS", b"\x1b[C", b"\r", RETURNED, b"\x03"])
+    output = session([b"added:2222", b"\x1bOS", b" ", b"\r", RETURNED, b"\x03"])
     assert b"Configure host" in output and b"completed" in output
     assert (root / "command.setup").read_text().splitlines() == ["added", "2222", "literal ; $HOME"]
     assert not (root / "command").exists(), "configure-only launched a connection"
     assert (root / ".bash_history").read_text() == before
     assert (root / ".ssh/config").read_text() == config_before
     child_env["SETUP_EXIT"] = "7"
-    output = session([b"added:2222", b"\x1bOS", b"\x1b[C", b"\r", RETURNED, b"\x03"])
+    output = session([b"added:2222", b"\x1bOS", b" ", b"\r", RETURNED, b"\x03"])
     assert b"failed" in output and not (root / "command").exists()
     assert (root / ".bash_history").read_text() == before
     del child_env["SETUP_EXIT"]
@@ -707,7 +717,7 @@ configuration_scripts:
     output = session([b"added:2222", b"\x1bOS", b"\r", b"\x1b", b"\x03"])
     assert b"Choose a setup recipe" in output
     assert not (root / "command.setup").exists()
-    session([b"added:2222", b"\x1bOS", b"\x1b[Z", b"\x1b[Z", b"\x1b[C", b"\t", b"draft", b"\x1b[Z", b"\x1b[D", b"\t", b"\t", b"\x1b[C", b"\r", RETURNED, b"\x03"])
+    session([b"added:2222", b"\x1bOS", b"\x1b[Z", b"\x1b[Z", b"\x1b[C", b"\t", b"draft", b"\x1b[Z", b"\x1b[D", b"\t", b"\t", b" ", b"\r", RETURNED, b"\x03"])
     assert (root / "command.setup").read_text().splitlines()[:2] == ["added", "2222"]
     # F4 carries a typed address into Add new; Shift+F4 always starts blank.
     session([b"no-such-host", b"\x1bOS", b"\r"])
@@ -740,20 +750,20 @@ configuration_scripts:
     command: ssh -- %h %{input:launch}
     inputs: [{id: launch, type: promptString, required: true}]"""))
     (root / "command").unlink()
-    output = session([b"added:2222", b"\x1bOS", b"\x1b[C", b"\r",
+    output = session([b"added:2222", b"\x1bOS", b" ", b"\r",
                       b"configure-value", b"\t", b"\x1b[C", b"\x1b\r", RETURNED, b"\x03"], rows=9, cols=90)
     assert b"is required" in output and b"completed" in output
     assert (root / "command.setup").read_text().splitlines() == ["added", "configure-value", "full"]
     assert not (root / "command").exists()
     config_file.write_text(setup_config)
     literal = "a ' ; $(touch SHOULD_NOT_EXIST) %{input:mode}"
-    output = session([ADD_REMOTE, b"inputs-host", b"\t", b"\x1b[C", b"\r", literal.encode(), b"\x1bOP", b"\x1b[6~", b"\x1bOP", b"\t", b"\x1b[C",
-                       b"\x1b[Z", b"\x1b[Z", b"\x1b[C", b"\x1b[D", b"\r"], rows=9, cols=90)
+    output = session([ADD_REMOTE, b"inputs-host", b"\t", b" ", b"\r", literal.encode(), b"\x1bOP", b"\x1b[6~", b"\x1bOP", b"\t", b"\x1b[C",
+                       b"\x1b[Z", b"\x1b[Z", b" ", b" ", b"\r"], rows=9, cols=90)
     assert b"is required" in output
     assert (root / "command.setup").read_text().splitlines() == ["inputs-host", literal, "full"]
     assert literal not in (root / ".bash_history").read_text(), "setup values must not enter history"
     before = (root / ".bash_history").read_text()
-    session([ADD_REMOTE, b"cancelled", b"\t", b"\x1b[C", b"\t", b"discard me", b"\x1b", b"\x03"])
+    session([ADD_REMOTE, b"cancelled", b"\t", b" ", b"\t", b"discard me", b"\x1b", b"\x03"])
     assert (root / ".bash_history").read_text() == before
     # Generators run on selection, cache results in this dialog, and pass resolved choices.
     config_file.write_text("""default: SSH
@@ -780,11 +790,11 @@ configuration_scripts:
 """)
     session([b"\x03"])
     assert not (root / "generator-runs").exists(), "generators ran during config load"
-    session([ADD_REMOTE, b"generated", b"\t", b"\x1b[C", b"\x1b[D", b"\x1b[C", b"\r"])
+    session([ADD_REMOTE, b"generated", b"\t", b" ", b" ", b" ", b"\r"])
     assert (root / "command.setup").read_text().splitlines() == ["generated text", "second"]
     assert (root / "generator-runs").read_text().splitlines() == ["run"], "generator was rerun instead of cached"
     (root / "command.setup").unlink()
-    output = session([ADD_REMOTE, b"broken", b"\t", b"\x1b[D", b"\r", b"\t", b"\t", b"\x1b[C", b"\x1b", b"\x03"])
+    output = session([ADD_REMOTE, b"broken", b"\t", b"\t", b" ", b"\r", b"\x1b", b"\x03"])
     assert b"generator test failure" in output
     assert not (root / "command.setup").exists(), "failed generator allowed setup to run"
     # Availability filters choices, preserves original script identity, and skips generators.
@@ -806,18 +816,18 @@ configuration_scripts:
 """)
     session([b"\x03"])
     assert not (root / "availability-checks").exists()
-    output = session([ADD_REMOTE, b"available", b"\t", b"\x1b[C", b"\r"])
+    output = session([ADD_REMOTE, b"available", b"\t", b" ", b"\r"])
     assert b"Running Visible for available" in output
     assert (root / "command.setup").read_text().splitlines() == ["visible"]
     assert (root / "availability-checks").read_text().splitlines() == ["checked"]
     assert not (root / "hidden-generator").exists()
     config_file.write_text(original_config)
     (root / ".ssh/id_ed25519").unlink()  # Public files alone do not make a keypair.
-    output = session([ADD_REMOTE, b"no-keys", b"\t", b"\x1b[C", b"\x1b[D", b"\r"])
+    output = session([ADD_REMOTE, b"no-keys", b"\t", b" ", b" ", b"\r"])
     assert not (root / ".ssh/id_ed25519").exists(), "opening setup must not generate keys"
     assert (root / "command").read_text().splitlines()[1:] == ["--", "no-keys"]
     (root / ".ssh/id_ed25519").write_text("fake private key")
-    output = session([ADD_REMOTE, b"\t", b"\x1b[C", b"\x1b", b"\x03"])
+    output = session([ADD_REMOTE, b"\t", b" ", b"\x1b", b"\x03"])
     assert (root / ".ssh/id_ed25519").read_text() == "fake private key"
     config_file.write_text(original_config)
     # Help is embedded and returns to the same filter/profile without launching anything.
@@ -1053,7 +1063,7 @@ keybindings:
     assert (root / "command").read_text().splitlines()[1:] == ["--", "new-rebound"]
     config_file.write_text(config_file.read_text() + "\nconfiguration_scripts: [{name: Rebound setup, command: 'setup-test %h'}]\n")
     (root / "command").unlink()
-    output = session([b"alpha", b"\x1b[20~", b"\x1b[C", b"\x1bOR", RETURNED, b"\x11"])
+    output = session([b"alpha", b"\x1b[20~", b" ", b"\x1bOR", RETURNED, b"\x11"])
     assert b"completed" in output and b"Apply" in output
     assert (root / "command.setup").read_text().splitlines() == ["alpha"]
     assert not (root / "command").exists()
@@ -1123,30 +1133,55 @@ printf 'generated public key' > "$private.pub"
     for suffix in ("keygen", "ssh-copy-id"):
         (root / ("command." + suffix)).unlink(missing_ok=True)
     before = (root / ".bash_history").read_text()
-    output = session([ADD_REMOTE, b"\t", b"\x1b[C", b"\x1b", b"\x03"])
+    output = session([ADD_REMOTE, b"\t", b" ", b"\x1b", b"\x03"])
     assert not (root / "command.keygen").exists()
     assert not (root / ".ssh/id_ed25519").exists()
     # Never overwrite a partial default pair, and don't copy anything after failure.
     (root / ".ssh/id_ed25519.pub").write_text("existing public key")
-    session([ADD_REMOTE, b"blocked", b"\t", b"\x1b[C", b"\r"], expected_status=1)
+    session([ADD_REMOTE, b"blocked", b"\t", b" ", b"\r"], expected_status=1)
     assert (root / ".ssh/id_ed25519.pub").read_text() == "existing public key"
     assert not (root / "command.keygen").exists()
     assert not (root / "command.ssh-copy-id").exists()
     assert (root / ".bash_history").read_text() == before
     (root / ".ssh/id_ed25519.pub").unlink()
     (root / "keygen-fail").touch()
-    session([ADD_REMOTE, b"failed", b"\t", b"\x1b[C", b"\r"], expected_status=1)
+    session([ADD_REMOTE, b"failed", b"\t", b" ", b"\r"], expected_status=1)
     assert not (root / "command.ssh-copy-id").exists()
     assert (root / ".bash_history").read_text() == before
     (root / "keygen-fail").unlink()
-    # Both recipes generate before copying, and all prompts receive a restored tty.
-    for steps, host in [(1, "generated"), (2, "generated-dotfiles")]:
-        for name in ("id_ed25519", "id_ed25519.pub"):
-            (root / ".ssh" / name).unlink(missing_ok=True)
-        session([ADD_REMOTE, (host + ":2202").encode(), b"\t"] + [b"\x1b[C"] * steps + [b"\r"])
-        assert (root / "command.keygen").read_text().splitlines() == ["-q", "-t", "ed25519", "-f", str(root / ".ssh/id_ed25519")]
-        assert (root / "command.ssh-copy-id").read_text().splitlines() == ["-p", "2202", "-i", str(root / ".ssh/id_ed25519.pub"), host]
-        assert (root / "command.keygen-tty").read_bytes() == (root / "command.tty").read_bytes()
+    # Key-auth generates before copying, with prompts on the restored tty.
+    session([ADD_REMOTE, b"generated:2202", b"\t", b" ", b"\r"])
+    assert (root / "command.keygen").read_text().splitlines() == ["-q", "-t", "ed25519", "-f", str(root / ".ssh/id_ed25519")]
+    assert (root / "command.ssh-copy-id").read_text().splitlines() == ["-p", "2202", "-i", str(root / ".ssh/id_ed25519.pub"), "generated"]
+    assert (root / "command.keygen-tty").read_bytes() == (root / "command.tty").read_bytes()
+    # Dotfiles installation uses normal SSH auth and does not generate/copy a key.
+    for name in ("id_ed25519", "id_ed25519.pub"):
+        (root / ".ssh" / name).unlink(missing_ok=True)
+    for suffix in ("keygen", "ssh-copy-id", "scp"):
+        (root / ("command." + suffix)).unlink(missing_ok=True)
+    session([ADD_REMOTE, b"generated-dotfiles:2202", b"\t", b"\t", b" ", b"\r"])
+    assert not (root / "command.keygen").exists()
+    assert not (root / "command.ssh-copy-id").exists()
+    assert (root / "command.scp").read_text().splitlines() == ["-P", "2202", "-r", str(root / "src/dotfiles") + "/.", "generated-dotfiles:src/dotfiles/"]
+    # Queued recipes run in configuration order; a failure prevents later work
+    # and the connection, even when recipes were checked in reverse order.
+    config_file.write_text('''default: SSH
+profiles: [{name: SSH, command: 'ssh -- %h'}]
+configuration_scripts:
+  - name: First queued
+    command: 'echo first >> "$HOME/queue-log"; test ! -f "$HOME/queue-fail"'
+  - name: Second queued
+    command: 'echo second >> "$HOME/queue-log"'
+''')
+    queue_keys = [ADD_REMOTE, b"queued:2202", b"\t", b"\t", b" ", b"\x1b[A", b" ", b"\r"]
+    session(queue_keys)
+    assert (root / "queue-log").read_text().splitlines() == ["first", "second"]
+    (root / "queue-log").unlink()
+    (root / "queue-fail").touch()
+    (root / "command").unlink()
+    session(queue_keys, expected_status=1)
+    assert (root / "queue-log").read_text().splitlines() == ["first"]
+    assert not (root / "command").exists()
     # A real controlling TTY must remain inaccessible to background checks.
     config_file.write_text("""default: SSH
 profiles:

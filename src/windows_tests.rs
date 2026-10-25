@@ -199,7 +199,23 @@ fn child(root: &Path) {
     fs::create_dir_all(root.join("src/dotfiles")).unwrap();
     fs::write(root.join("src/dotfiles/install.sh"), "fixture").unwrap();
     for profile in &config.configuration_scripts {
-        assert_eq!(profile.shell, Shell::Powershell);
+        let direct = matches!(
+            profile.name.as_str(),
+            "Configure passwordless sudo"
+                | "Configure SSH-agent sudo"
+                | "Configure automatic security updates"
+                | "Install Docker / Podman"
+                | "Configure log limits and cleanup"
+                | "Configure firewall"
+        );
+        assert_eq!(
+            profile.shell,
+            if direct {
+                Shell::Direct
+            } else {
+                Shell::Powershell
+            }
+        );
         assert!(profile.is_available(), "{}", profile.name);
         let mut profile = profile.clone();
         for input in &mut profile.inputs {
@@ -230,6 +246,19 @@ fn child(root: &Path) {
                 all[1][all[1].len() - 2],
                 remote_field(&profile, "expiry_remote", &target)
             );
+        } else if direct {
+            assert_eq!(all.len(), 1);
+            assert!(all[0].iter().any(|arg| arg == "-tt"));
+            assert_eq!(
+                all[0].iter().any(|arg| arg == "-A"),
+                profile.name == "Configure SSH-agent sudo"
+            );
+        } else if profile.name == "Install dotfiles" {
+            assert_eq!(all.len(), 3);
+            assert_eq!(Path::new(&all[0][0]).file_stem().unwrap(), "ssh");
+            assert_eq!(Path::new(&all[1][0]).file_stem().unwrap(), "scp");
+            assert_eq!(Path::new(&all[2][0]).file_stem().unwrap(), "ssh");
+            assert!(all.iter().all(|call| !call.iter().any(|arg| arg == "-i")));
         } else {
             assert_eq!(
                 all.last().unwrap().last().unwrap(),

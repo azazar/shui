@@ -294,6 +294,7 @@ struct Selection {
     profile: usize,
     setup: Option<usize>,
     setup_command: Option<(String, Vec<String>)>,
+    additional_setup: Vec<(usize, (String, Vec<String>))>,
     new: bool,
     configure_only: bool,
     return_to_menu: bool,
@@ -576,6 +577,7 @@ fn menu(
                         profile,
                         setup: None,
                         setup_command: None,
+                        additional_setup: Vec::new(),
                         new: visible.is_empty(),
                         configure_only: false,
                         return_to_menu: key.modifiers.contains(KeyModifiers::ALT)
@@ -788,6 +790,7 @@ fn menu(
                                 profile,
                                 setup: None,
                                 setup_command: None,
+                                additional_setup: Vec::new(),
                                 new: true,
                                 configure_only: false,
                                 return_to_menu: key.modifiers.contains(KeyModifiers::ALT),
@@ -817,6 +820,7 @@ fn menu(
                             profile: profile_index,
                             setup: None,
                             setup_command: None,
+                            additional_setup: Vec::new(),
                             new: false,
                             configure_only: false,
                             return_to_menu: key.modifiers.contains(KeyModifiers::ALT)
@@ -1045,6 +1049,7 @@ fn run() -> io::Result<()> {
             profile: profile_index,
             setup,
             setup_command,
+            additional_setup,
             new,
             configure_only,
             connection_command,
@@ -1065,12 +1070,15 @@ fn run() -> io::Result<()> {
                     continue;
                 }
             }
-            if let Some(index) = setup {
+            let mut setup_failed = false;
+            for (index, (program, args)) in
+                setup.zip(setup_command).into_iter().chain(additional_setup)
+            {
                 let script = &config.configuration_scripts[index];
                 println!("Running {} for {}", script.name, target.label());
-                let (program, args) = setup_command.expect("validated setup command");
                 let status = Command::new(program).args(args).status();
                 if configure_only {
+                    setup_failed = !status.as_ref().is_ok_and(|status| status.success());
                     state.notice = Some(match status {
                         Ok(status) if status.success() => {
                             format!("Setup completed: {} · {}", script.name, target.label())
@@ -1084,6 +1092,9 @@ fn run() -> io::Result<()> {
                         }
                         Err(err) => format!("Setup failed: {err} · {}", target.label()),
                     });
+                    if setup_failed {
+                        break;
+                    }
                     continue;
                 }
                 let status = status?;
@@ -1093,6 +1104,9 @@ fn run() -> io::Result<()> {
                         script.name
                     )));
                 }
+            }
+            if configure_only || setup_failed {
+                continue;
             }
             let custom = connection_command.is_some();
             let (program, args) = match connection_command {

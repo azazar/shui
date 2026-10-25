@@ -35,7 +35,7 @@ pub(super) fn dialog(
     selected: Option<&Target>,
     draft: Option<&Target>,
 ) -> io::Result<Option<Selection>> {
-    form(terminal, config, None, false, selected, draft)
+    setup_form(terminal, config, selected, draft)
 }
 
 pub(super) fn connect(
@@ -103,6 +103,10 @@ struct FormView<'a> {
 }
 
 struct Dialog {
+    setup_fields: Option<Vec<(String, String)>>,
+    setup_input: Option<launch::Input>,
+    setup_checkbox: bool,
+    queued: Option<(bool, usize)>,
     required_height: usize,
     selector_choices: usize,
     list_state: ListState,
@@ -111,6 +115,10 @@ struct Dialog {
 impl Dialog {
     fn new(scripts: &[launch::Profile], connecting: bool) -> Self {
         Self {
+            setup_fields: None,
+            setup_input: None,
+            setup_checkbox: false,
+            queued: None,
             // Reserve room for every available recipe before opening the form.
             // Switching recipes changes its contents, never its screen position.
             required_height: scripts
@@ -196,7 +204,14 @@ impl Dialog {
             (
                 if connecting { "Profile" } else { "Setup" }.to_owned(),
                 if self.selector_choices > 1 {
-                    format!("← {} →", script.map_or("None", |s| s.name.as_str()))
+                    match self.queued {
+                        Some((checked, count)) => format!(
+                            "← [{}] {} → · {count} queued",
+                            if checked { "x" } else { " " },
+                            script.map_or("None", |s| s.name.as_str())
+                        ),
+                        None => format!("← {} →", script.map_or("None", |s| s.name.as_str())),
+                    }
                 } else {
                     script.map_or("None", |s| s.name.as_str()).to_owned()
                 },
@@ -219,6 +234,9 @@ impl Dialog {
                     value.to_owned()
                 },
             ));
+        }
+        if let Some(setup_fields) = &self.setup_fields {
+            fields = setup_fields.clone();
         }
         if fields.len() <= usize::from(areas[1].height) {
             *self.list_state.offset_mut() = 0;
@@ -268,17 +286,30 @@ impl Dialog {
         );
         let keys = &config.keybindings;
         let remote_field = usize::from(!connecting);
-        let input = focus
-            .checked_sub(remote_field + 2)
-            .and_then(|index| inputs.get(index));
+        let input = if self.setup_fields.is_some() {
+            self.setup_input.as_ref()
+        } else {
+            focus
+                .checked_sub(remote_field + 2)
+                .and_then(|index| inputs.get(index))
+        };
         let can_choose = (!connecting && focus == 0)
-            || (focus == remote_field + 1 && self.selector_choices > 1)
+            || (self.setup_fields.is_none()
+                && focus == remote_field + 1
+                && self.selector_choices > 1)
             || input.is_some_and(|input| {
                 input.kind == launch::InputType::PickString && input.options.len() > 1
             });
         let can_edit = (focus == remote_field && !fixed_remote)
             || input.is_some_and(|input| input.kind == launch::InputType::PromptString);
         let mut items = vec![
+            bar::Item::action(keys, "dialog", "toggle_recipe", "Queue", 2).available(
+                if self.setup_fields.is_some() {
+                    self.setup_checkbox
+                } else {
+                    !connecting && focus == remote_field + 1
+                },
+            ),
             bar::Item::pair(keys, "dialog", "previous_field", "next_field", "Field", 3),
             bar::Item::pair(keys, "dialog", "left", "right", "Choice", 4).available(can_choose),
             bar::Item::action(
@@ -317,6 +348,311 @@ impl Dialog {
             }
         }
         bar_state.draw(frame, areas[3], config, "dialog", items);
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SetupRow {
+    Action,
+    Remote,
+    Recipe(usize),
+    Input(usize, usize),
+}
+
+fn setup_form(
+    terminal: &mut impl ui::Terminal,
+    config: &launch::Config,
+    selected: Option<&Target>,
+    draft: Option<&Target>,
+) -> io::Result<Option<Selection>> {
+    let available: Vec<_> = config
+        .configuration_scripts
+        .iter()
+        .enumerate()
+        .filter(|(_, recipe)| recipe.is_available())
+        .map(|(i, _)| i)
+        .collect();
+    let mut recipes: Vec<_> = available
+        .iter()
+        .map(|i| config.configuration_scripts[*i].clone())
+        .collect();
+    let mut checked = vec![false; recipes.len()];
+    let mut loaded = vec![false; recipes.len()];
+    let mut errors = vec![String::new(); recipes.len()];
+    let mut values: Vec<_> = recipes.iter().map(|r| r.input_defaults()).collect();
+    let mut remote = selected.or(draft).map(Target::label).unwrap_or_default();
+    let mut alternate_remote = String::new();
+    let mut configuring = selected.is_some();
+    let mut focus = if configuring && !recipes.is_empty() {
+        SetupRow::Recipe(0)
+    } else {
+        SetupRow::Remote
+    };
+    let mut error = String::new();
+    let mut bar_state = bar::State::default();
+    let mut dialog = Dialog::new(&recipes, false);
+    dialog.required_height = 8 + recipes.iter().map(|r| 1 + r.inputs.len()).sum::<usize>();
+    loop {
+        let mut rows = vec![SetupRow::Action, SetupRow::Remote];
+        let mut fields = vec![
+            (
+                "Action".into(),
+                format!(
+                    "← {} →",
+                    if configuring {
+                        "Configure host"
+                    } else {
+                        "Add new"
+                    }
+                ),
+            ),
+            ("Remote".into(), remote.clone()),
+        ];
+        for (i, recipe) in recipes.iter().enumerate() {
+            rows.push(SetupRow::Recipe(i));
+            fields.push((
+                format!("[{}]", if checked[i] { "x" } else { " " }),
+                recipe.name.clone(),
+            ));
+            if checked[i] {
+                for (j, input) in recipe.inputs.iter().enumerate() {
+                    rows.push(SetupRow::Input(i, j));
+                    let value = values[i].get(&input.id).cloned().unwrap_or_default();
+                    fields.push((
+                        format!(
+                            "  {}{}",
+                            input.label(),
+                            if input.required { " *" } else { "" }
+                        ),
+                        if input.kind == launch::InputType::PickString && input.options.len() > 1 {
+                            format!("← {value} →")
+                        } else {
+                            value
+                        },
+                    ));
+                }
+            }
+        }
+        let position = rows.iter().position(|r| *r == focus).unwrap_or(1);
+        focus = rows[position];
+        dialog.setup_fields = Some(fields);
+        dialog.setup_checkbox = matches!(focus, SetupRow::Recipe(_));
+        dialog.setup_input = match focus {
+            SetupRow::Input(i, j) => Some(recipes[i].inputs[j].clone()),
+            _ => None,
+        };
+        let generation_error = match focus {
+            SetupRow::Recipe(i) | SetupRow::Input(i, _) if checked[i] => errors[i].as_str(),
+            _ => "",
+        };
+        terminal.draw(|frame| {
+            dialog.draw(
+                frame,
+                config,
+                &bar_state,
+                FormView {
+                    connecting: false,
+                    configuring,
+                    fixed_remote: false,
+                    remote: &remote,
+                    script: None,
+                    values: None,
+                    focus: position,
+                    generation_error,
+                    error: &error,
+                },
+            )
+        })?;
+        let event = terminal.read()?;
+        if matches!(event, Event::FocusLost) {
+            bar_state.reset();
+        }
+        let Event::Key(event) = event else {
+            continue;
+        };
+        if bar_state.event(event, &config.keybindings, "dialog")
+            || event.kind == KeyEventKind::Release
+        {
+            continue;
+        }
+        let repeated = event.kind == KeyEventKind::Repeat;
+        let Some(key) = config
+            .keybindings
+            .translate_dialog(event, dialog.setup_checkbox)
+        else {
+            continue;
+        };
+        if repeated && matches!(key.code, KeyCode::Enter | KeyCode::F(_) | KeyCode::Esc) {
+            continue;
+        }
+        match key.code {
+            KeyCode::Esc => return Ok(None),
+            KeyCode::F(1) => {
+                bar_state.reset();
+                crate::help::show(terminal, crate::help::Context::Setup, config)?;
+            }
+            KeyCode::Tab | KeyCode::Down => focus = rows[(position + 1) % rows.len()],
+            KeyCode::BackTab | KeyCode::Up => {
+                focus = rows[(position + rows.len() - 1) % rows.len()]
+            }
+            KeyCode::F(6) => {
+                if let SetupRow::Recipe(i) = focus {
+                    checked[i] = !checked[i];
+                    error.clear();
+                    if checked[i] && !loaded[i] {
+                        match recipes[i]
+                            .inputs
+                            .iter()
+                            .map(|input| input.resolve())
+                            .collect::<io::Result<Vec<_>>>()
+                        {
+                            Ok(inputs) => {
+                                recipes[i].inputs = inputs;
+                                values[i] = recipes[i].input_defaults();
+                                loaded[i] = true;
+                                errors[i].clear();
+                            }
+                            Err(err) => errors[i] = err.to_string(),
+                        }
+                    }
+                }
+            }
+            KeyCode::Left | KeyCode::Right => {
+                match focus {
+                    SetupRow::Action => {
+                        configuring = !configuring;
+                        std::mem::swap(&mut remote, &mut alternate_remote);
+                    }
+                    SetupRow::Input(i, j) => {
+                        let input = &recipes[i].inputs[j];
+                        if input.kind == launch::InputType::PickString && !input.options.is_empty()
+                        {
+                            let value = values[i].get_mut(&input.id).unwrap();
+                            let index = input
+                                .options
+                                .iter()
+                                .position(|option| option == value)
+                                .unwrap_or(0);
+                            let delta = if key.code == KeyCode::Right {
+                                1
+                            } else {
+                                input.options.len() - 1
+                            };
+                            *value = input.options[(index + delta) % input.options.len()].clone();
+                        }
+                    }
+                    _ => {}
+                }
+                error.clear();
+            }
+            KeyCode::Enter => {
+                if configuring && !checked.iter().any(|v| *v) {
+                    error = " Choose a setup recipe to configure this host".into();
+                    if !recipes.is_empty() {
+                        focus = SetupRow::Recipe(0);
+                    }
+                    continue;
+                }
+                let Some(target) = parse_remote(&remote) else {
+                    error = " Enter a valid host and optional port (1–65535)".into();
+                    focus = SetupRow::Remote;
+                    continue;
+                };
+                let target = if let Some(home) = env::home_dir() {
+                    let users = ssh_config::load(&home, &local_username()).users;
+                    if configuring {
+                        ssh_config::normalize_target(&target, &users)
+                    } else {
+                        config.profiles[config.default_index()].normalize_target(&target, &users)
+                    }
+                } else {
+                    target
+                };
+                let mut commands = Vec::new();
+                let mut invalid = false;
+                for (i, recipe) in recipes.iter().enumerate() {
+                    if !checked[i] {
+                        continue;
+                    }
+                    if !errors[i].is_empty() {
+                        focus = SetupRow::Recipe(i);
+                        invalid = true;
+                        break;
+                    }
+                    if let Some((j, err)) =
+                        recipe.inputs.iter().enumerate().find_map(|(j, input)| {
+                            input
+                                .validate_value(&values[i][&input.id])
+                                .err()
+                                .map(|err| (j, err))
+                        })
+                    {
+                        error = format!(" {}: {err}", recipe.name);
+                        focus = SetupRow::Input(i, j);
+                        invalid = true;
+                        break;
+                    }
+                    match recipe.command_with_inputs(&target, &values[i]) {
+                        Ok(command) => commands.push((available[i], command)),
+                        Err(err) => {
+                            error = format!(" {}: {err}", recipe.name);
+                            focus = SetupRow::Recipe(i);
+                            invalid = true;
+                            break;
+                        }
+                    }
+                }
+                if invalid {
+                    continue;
+                }
+                let mut commands = commands.into_iter();
+                let first = commands.next();
+                return Ok(Some(Selection {
+                    target,
+                    profile: config.default_index(),
+                    setup: first.as_ref().map(|(i, _)| *i),
+                    setup_command: first.map(|(_, command)| command),
+                    additional_setup: commands.collect(),
+                    new: !configuring,
+                    configure_only: configuring,
+                    return_to_menu: key.modifiers.contains(KeyModifiers::ALT),
+                    connection_command: None,
+                }));
+            }
+            _ => {
+                let editable = match focus {
+                    SetupRow::Remote => Some(&mut remote),
+                    SetupRow::Input(i, j)
+                        if recipes[i].inputs[j].kind == launch::InputType::PromptString =>
+                    {
+                        values[i].get_mut(&recipes[i].inputs[j].id)
+                    }
+                    _ => None,
+                };
+                if let Some(value) = editable {
+                    match key.code {
+                        KeyCode::Backspace | KeyCode::Delete | KeyCode::Char('h')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            crate::erase_filter_word(value)
+                        }
+                        KeyCode::Backspace | KeyCode::Delete => {
+                            value.pop();
+                        }
+                        KeyCode::Char(c)
+                            if !c.is_control()
+                                && !key
+                                    .modifiers
+                                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                        {
+                            value.push(c)
+                        }
+                        _ => continue,
+                    }
+                    error.clear();
+                }
+            }
+        }
     }
 }
 
@@ -369,6 +705,8 @@ fn form(
     let mut dialog = Dialog::new(&scripts, connecting);
     let mut values: Vec<_> = scripts.iter().map(|p| p.input_defaults()).collect();
     let mut loaded = vec![false; scripts.len()];
+    let mut queued = vec![false; scripts.len()];
+    let mut queue_mode = false;
     let mut generation_error = String::new();
     let mut error = String::new();
     let mut bar_state = bar::State::default();
@@ -395,6 +733,12 @@ fn form(
         let inputs = script.map_or(&[][..], |s| s.inputs.as_slice());
         let field_count = inputs.len() + input_start;
         focus = focus.min(field_count - 1);
+        dialog.queued = (!connecting && queue_mode).then(|| {
+            (
+                setup.checked_sub(1).is_some_and(|i| queued[i]),
+                queued.iter().filter(|selected| **selected).count(),
+            )
+        });
         terminal.draw(|frame| {
             dialog.draw(
                 frame,
@@ -427,7 +771,10 @@ fn form(
             continue;
         }
         let repeated = key.kind == KeyEventKind::Repeat;
-        let Some(key) = config.keybindings.translate("dialog", key) else {
+        let Some(key) = config
+            .keybindings
+            .translate_dialog(key, !connecting && focus == recipe_field)
+        else {
             continue;
         };
         if repeated
@@ -449,6 +796,17 @@ fn form(
             continue;
         }
         match key.code {
+            KeyCode::F(6) if !connecting && focus == recipe_field => {
+                if !repeated {
+                    queue_mode = true;
+                    if let Some(i) = setup.checked_sub(1) {
+                        queued[i] = !queued[i];
+                    } else {
+                        queued.fill(false);
+                    }
+                    error.clear();
+                }
+            }
             KeyCode::F(1) => {
                 bar_state.reset();
                 crate::help::show(
@@ -500,10 +858,20 @@ fn form(
                 error.clear();
             }
             KeyCode::Enter => {
-                if !generation_error.is_empty() {
+                if !generation_error.is_empty()
+                    && (connecting
+                        || !queue_mode
+                        || setup.checked_sub(1).is_some_and(|i| queued[i]))
+                {
                     continue;
                 }
-                if configuring && setup == 0 {
+                if configuring
+                    && if queue_mode {
+                        !queued.iter().any(|v| *v)
+                    } else {
+                        setup == 0
+                    }
+                {
                     error = " Choose a setup recipe to configure this host".into();
                     focus = recipe_field;
                     continue;
@@ -532,12 +900,68 @@ fn form(
                     .checked_sub(1)
                     .map_or_else(HashMap::new, |i| values[i].clone());
                 let mut setup_command = None;
-                if let Some(script) = script {
-                    if let Some(index) = inputs
-                        .iter()
-                        .position(|i| i.required && selected_values[&i.id].trim().is_empty())
+                let mut additional_setup = Vec::new();
+                let mut first_setup = None;
+                if !connecting && queue_mode {
+                    let mut invalid = false;
+                    for i in 0..scripts.len() {
+                        if !queued[i] {
+                            continue;
+                        }
+                        if !loaded[i] {
+                            setup = i + 1;
+                            generation_error.clear();
+                            invalid = true;
+                            break;
+                        }
+                        if let Some((index, err)) =
+                            scripts[i]
+                                .inputs
+                                .iter()
+                                .enumerate()
+                                .find_map(|(index, input)| {
+                                    input
+                                        .validate_value(&values[i][&input.id])
+                                        .err()
+                                        .map(|err| (index, err))
+                                })
+                        {
+                            error = format!(" {}: {err}", scripts[i].name);
+                            setup = i + 1;
+                            focus = index + input_start;
+                            invalid = true;
+                            break;
+                        }
+                        match scripts[i].command_with_inputs(&target, &values[i]) {
+                            Ok(command) => {
+                                if first_setup.is_none() {
+                                    first_setup = Some(available[i]);
+                                    setup_command = Some(command);
+                                } else {
+                                    additional_setup.push((available[i], command));
+                                }
+                            }
+                            Err(err) => {
+                                error = format!(" {}: {err}", scripts[i].name);
+                                setup = i + 1;
+                                invalid = true;
+                                break;
+                            }
+                        }
+                    }
+                    if invalid {
+                        continue;
+                    }
+                } else if let Some(script) = script {
+                    if let Some((index, err)) =
+                        inputs.iter().enumerate().find_map(|(index, input)| {
+                            input
+                                .validate_value(&selected_values[&input.id])
+                                .err()
+                                .map(|err| (index, err))
+                        })
                     {
-                        error = format!(" {} is required", inputs[index].label());
+                        error = format!(" {err}");
                         focus = index + input_start;
                         continue;
                     }
@@ -558,6 +982,8 @@ fn form(
                     },
                     setup: if connecting {
                         None
+                    } else if queue_mode {
+                        first_setup
                     } else {
                         setup.checked_sub(1).map(|i| available[i])
                     },
@@ -567,6 +993,7 @@ fn form(
                         None
                     },
                     setup_command: if connecting { None } else { setup_command },
+                    additional_setup,
                     new: !connecting && !configuring,
                     configure_only: configuring,
                     return_to_menu: key.modifiers.contains(KeyModifiers::ALT),

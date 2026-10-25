@@ -37,6 +37,7 @@ keybindings:
     cancel: [Esc, Ctrl+C]
     next_field: [Tab, Down]
     previous_field: [Shift+Tab, Up]
+    toggle_recipe: [Space]
     left: [Left]
     right: [Right]
     erase_character: [Backspace, Delete]

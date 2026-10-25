@@ -1288,6 +1288,7 @@ dependencies = [
  "glob",
  "nix 0.31.3",
  "ratatui",
+ "regex",
  "serde",
  "serde_yaml_ng",
  "shell-words",

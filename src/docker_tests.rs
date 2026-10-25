@@ -64,7 +64,13 @@ fn export_docker_fixtures() {
     }
     let recipes = [
         ("Configure key-based auth", "auth"),
-        ("Configure key-based auth + install dotfiles", "dotfiles"),
+        ("Install dotfiles", "dotfiles"),
+        ("Configure passwordless sudo", "sudo-nopasswd"),
+        ("Configure SSH-agent sudo", "sudo-agent"),
+        ("Configure automatic security updates", "security-updates"),
+        ("Install Docker / Podman", "containers"),
+        ("Configure log limits and cleanup", "logs"),
+        ("Configure firewall", "firewall"),
         ("Copy terminal definition", "terminfo"),
     ];
     assert_eq!(
@@ -90,6 +96,79 @@ fn export_docker_fixtures() {
         }
         let values = p.input_defaults();
         write(id, p.command_with_inputs(&target, &values).unwrap());
+        if id == "containers" {
+            let mut podman = values.clone();
+            podman.insert("engine".into(), "Podman".into());
+            write("podman", p.command_with_inputs(&target, &podman).unwrap());
+        }
+        if id == "logs" {
+            let mut limits = values.clone();
+            limits.insert("disk".into(), "16M".into());
+            limits.insert("runtime".into(), "16M".into());
+            limits.insert("days".into(), "2".into());
+            write(
+                "journald-small",
+                p.command_with_inputs(&target, &limits).unwrap(),
+            );
+            let mut cleanup = limits.clone();
+            cleanup.insert("caches".into(), "Package and login-user caches".into());
+            write(
+                "logs-retention",
+                p.command_with_inputs(&target, &cleanup).unwrap(),
+            );
+            cleanup.insert(
+                "cleanup".into(),
+                "Remove all archives and selected caches".into(),
+            );
+            write(
+                "logs-cleanup",
+                p.command_with_inputs(&target, &cleanup).unwrap(),
+            );
+            cleanup.insert("guests".into(), "Running guests recursively".into());
+            write(
+                "logs-guests",
+                p.command_with_inputs(&target, &cleanup).unwrap(),
+            );
+            limits.insert("disk".into(), "invalid-size".into());
+            assert!(p.command_with_inputs(&target, &limits).is_err());
+            // Bypass only client patterns to exercise the remote safety check too.
+            let mut remote_check = p.clone();
+            for input in &mut remote_check.inputs {
+                input.pattern = None;
+            }
+            write(
+                "journald-invalid",
+                remote_check.command_with_inputs(&target, &limits).unwrap(),
+            );
+        }
+        if id == "firewall" {
+            for (name, ips, ports) in [
+                (
+                    "firewall-restricted",
+                    "192.0.2.2,2001:db8::2",
+                    "8080/tcp 5353/udp",
+                ),
+                ("firewall-changed", "192.0.2.3", "8080/tcp"),
+                ("firewall-invalid-ip", "not-an-ip", ""),
+                ("firewall-invalid-port", "", "70000/tcp"),
+                ("firewall-ssh-bypass", "192.0.2.2", "2200-2300/tcp"),
+            ] {
+                let mut options = values.clone();
+                options.insert("ssh_ips".into(), ips.into());
+                options.insert("ports".into(), ports.into());
+                let mut remote_check = p.clone();
+                if matches!(name, "firewall-invalid-ip" | "firewall-invalid-port") {
+                    assert!(p.command_with_inputs(&target, &options).is_err());
+                    for input in &mut remote_check.inputs {
+                        input.pattern = None;
+                    }
+                }
+                write(
+                    name,
+                    remote_check.command_with_inputs(&target, &options).unwrap(),
+                );
+            }
+        }
         if id == "auth" {
             for expiry in ["8 hours", "day", "week", "month", "year", "never"] {
                 let mut expiring = values.clone();
@@ -107,5 +186,5 @@ fn export_docker_fixtures() {
             );
         }
     }
-    fs::write(directory.join("coverage.txt"), "Profiles: SSH, Bash, Tmux, Zellij, Monitor\nRecipes: key auth (existing and generated), key auth + dotfiles, terminal definition\nExcluded: Mosh (UDP client), MC (VFS client), SFTP (client), Tunnel/SOCKS (client forwarding), Dropbear/PuTTY/Plink (alternative clients)\n").unwrap();
+    fs::write(directory.join("coverage.txt"), "Profiles: SSH, Bash, Tmux, Zellij, Monitor\nRecipes: key auth (existing and generated), dotfiles install, passwordless sudo, SSH-agent sudo, terminal definition\nService recipes (--services): security updates, Docker/Podman, log limits and cleanup (including guest agents and caches), firewall\nExcluded: Mosh (UDP client), MC (VFS client), SFTP (client), Tunnel/SOCKS (client forwarding), Dropbear/PuTTY/Plink (alternative clients)\n").unwrap();
 }

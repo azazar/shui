@@ -217,26 +217,31 @@ configuration_scripts:
         Invoke-Native scp ($copy + @('-i', $private, '-r', (Join-Path $Source '.'), ($Destination + ':src/dotfiles/')))
         Invoke-Native ssh ($connection + @('-i', $private, '-tt', '--', $Destination, $Remote))
       }
-  - name: Configure key-based auth + install dotfiles
-    prepare_key: null
-    setup_script: null
+  - name: Install dotfiles
     shell: powershell
-    available_command: Get-Command ssh,ssh-keygen,scp -CommandType Application -ErrorAction Stop | Out-Null
+    available_command: Get-Command ssh,scp -CommandType Application -ErrorAction Stop | Out-Null
     windows: *windows_helpers
-    install_key_remote: *install_key_remote
-    install_key: *install_key
-    setup_windows: *setup_windows
+    setup_dotfiles: |
+      param($Destination, $Port, $Source, $Installer, $Remote)
+      $ErrorActionPreference = 'Stop'
+      if (![IO.Path]::IsPathRooted($Source)) { $Source = Join-Path $env:USERPROFILE $Source }
+      if (!(Test-Path -LiteralPath (Join-Path $Source $Installer) -PathType Leaf)) { throw "Missing installer: $Source/$Installer" }
+      $connection = @()
+      if ($Port) { $connection = @('-p', $Port) }
+      Invoke-Native ssh ($connection + @('--', $Destination, 'mkdir -p "$HOME/src/dotfiles"'))
+      $copy = @()
+      if ($Port) { $copy = @('-P', $Port) }
+      Invoke-Native scp ($copy + @('-r', (Join-Path $Source '.'), ($Destination + ':src/dotfiles/')))
+      Invoke-Native ssh ($connection + @('-tt', '--', $Destination, $Remote))
     inputs:
-      - *windows_key
-      - *windows_expiry
       - id: source
         type: promptString
-        description: Local dotfiles directory
+        description: Local directory (absolute or relative to user profile)
         default: src/dotfiles
         required: true
       - id: installer
         type: promptString
-        description: Installer filename
+        description: Installer path relative to dotfiles directory
         default: install.sh
         required: true
       - id: shell
@@ -244,7 +249,31 @@ configuration_scripts:
         description: Installer shell
         options: [sh, bash]
         default: sh
-    command: . ([scriptblock]::Create(%{windows})); & ([scriptblock]::Create(%{setup_windows})) %h %p %{input:key} %{expiry_remote} %{install_key_remote} %{input:source} %{input:installer} %{remote}
+    command: . ([scriptblock]::Create(%{windows})); & ([scriptblock]::Create(%{setup_dotfiles})) %h %p %{input:source} %{input:installer} %{remote}
+  - name: Configure passwordless sudo
+    shell: direct
+    command: ssh -tt -- %h %{remote}
+    port_args: [-p, '%p']
+  - name: Configure SSH-agent sudo
+    shell: direct
+    command: ssh -A -tt -- %h %{remote}
+    port_args: [-p, '%p']
+  - name: Configure automatic security updates
+    shell: direct
+    command: ssh -tt -- %h %{remote}
+    port_args: [-p, '%p']
+  - name: Install Docker / Podman
+    shell: direct
+    command: ssh -tt -- %h %{remote}
+    port_args: [-p, '%p']
+  - name: Configure log limits and cleanup
+    shell: direct
+    command: ssh -tt -- %h %{remote}
+    port_args: [-p, '%p']
+  - name: Configure firewall
+    shell: direct
+    command: ssh -tt -- %h %{remote}
+    port_args: [-p, '%p']
   - name: Copy terminal definition
     export_script: null
     shell: powershell

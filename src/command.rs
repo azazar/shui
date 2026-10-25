@@ -93,8 +93,16 @@ mod tests {
                 }
             }
         }
-        let profile = config.profiles.iter().find(|p| p.name == "Tunnel").unwrap();
+        let mut profile = config
+            .profiles
+            .iter()
+            .find(|p| p.name == "Tunnel")
+            .unwrap()
+            .clone();
         let value = "8080:$(touch injected);'host:80";
+        assert!(profile.inputs[0].validate_value(value).is_err());
+        // Quoting remains safe even for custom configurations without a pattern.
+        profile.inputs[0].pattern = None;
         let (_, args) = profile
             .command_with_inputs(
                 &Target {

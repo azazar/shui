@@ -403,6 +403,11 @@ pub struct Input {
     pub options: Vec<String>,
     #[serde(default)]
     pub required: bool,
+    /// A Rust regular expression matched against the entire nonempty value.
+    #[serde(default)]
+    pub pattern: Option<String>,
+    #[serde(default)]
+    pub validation_message: Option<String>,
     #[serde(default)]
     pub command: Option<String>,
     #[serde(default)]
@@ -465,6 +470,41 @@ impl Input {
             &self.description
         }
     }
+    fn value_pattern(&self) -> io::Result<Option<regex::Regex>> {
+        self.pattern
+            .as_ref()
+            .map(|pattern| {
+                regex::Regex::new(&format!(r"\A(?:{pattern})\z")).map_err(|error| {
+                    invalid(format!("{}: invalid input pattern: {error}", self.label()))
+                })
+            })
+            .transpose()
+    }
+    pub fn validate_value(&self, value: &str) -> io::Result<()> {
+        if self.required && value.trim().is_empty() {
+            return Err(invalid(format!("{} is required", self.label())));
+        }
+        if value.chars().any(char::is_control)
+            || (self.kind == InputType::PickString && !self.options.contains(&value.to_string()))
+        {
+            return Err(invalid(format!("invalid value for {}", self.label())));
+        }
+        // Optional empty fields bypass the pattern; required fields do not.
+        if !value.is_empty()
+            && self
+                .value_pattern()?
+                .is_some_and(|pattern| !pattern.is_match(value))
+        {
+            return Err(invalid(format!(
+                "{}: {}",
+                self.label(),
+                self.validation_message
+                    .as_deref()
+                    .unwrap_or("value does not match the required format")
+            )));
+        }
+        Ok(())
+    }
     fn validate(&self) -> io::Result<()> {
         if self.id.is_empty()
             || !self
@@ -477,6 +517,9 @@ impl Input {
             ));
         }
         if self.description.chars().any(char::is_control)
+            || self.validation_message.as_ref().is_some_and(|message| {
+                message.trim().is_empty() || message.chars().any(char::is_control)
+            })
             || self
                 .default
                 .iter()
@@ -511,6 +554,15 @@ impl Input {
                 return Err(invalid("options are only supported for pickString"));
             }
             _ => {}
+        }
+        self.value_pattern()?;
+        if self.command.is_none() {
+            for value in self.default.iter().chain(&self.options) {
+                // Empty prompt defaults are allowed even for required fields.
+                if !value.is_empty() {
+                    self.validate_value(value)?;
+                }
+            }
         }
         Ok(())
     }
@@ -732,12 +784,7 @@ impl Profile {
             let value = values
                 .get(&input.id)
                 .ok_or_else(|| invalid(format!("missing input: {}", input.id)))?;
-            if (input.required && value.trim().is_empty())
-                || value.chars().any(char::is_control)
-                || (input.kind == InputType::PickString && !input.options.contains(value))
-            {
-                return Err(invalid(format!("invalid value for {}", input.label())));
-            }
+            input.validate_value(value)?;
         }
         self.build_command(
             self.expand(&self.command, target, &mut Vec::new(), true, values)?,
@@ -1593,6 +1640,10 @@ mod tests {
             "{id: x, type: promptString, options: [one]}",
             "{id: 'bad:id', type: promptString}",
             "{id: x, type: promptString, default: [invalid]}",
+            "{id: x, type: promptString, pattern: '['}",
+            "{id: x, type: promptString, pattern: '[0-9]+', default: abc}",
+            "{id: x, type: pickString, pattern: '[0-9]+', options: ['1', abc]}",
+            "{id: x, type: promptString, validation_message: ''}",
             "{id: x, type: promptString}, {id: x, type: promptString}",
         ] {
             assert!(Config::parse(&format!("default: SSH\nprofiles: [{{name: SSH, command: 'ssh %h'}}]\nconfiguration_scripts: [{{name: Setup, command: 'echo ok', inputs: [{definition}]}}]")).is_err(), "{definition}");
@@ -1606,6 +1657,124 @@ mod tests {
                 "default: SSH\nprofiles: [{{name: SSH, command: 'ssh %h'}}]\nconfiguration_scripts:\n  - name: Setup\n    command: '{command}'\n    inputs: [{{id: x, type: promptString}}]\n"
             );
             assert!(Config::parse(&yaml).is_err(), "{command}");
+        }
+    }
+
+    #[test]
+    fn input_patterns_validate_complete_values_and_generated_defaults() {
+        let input: Input = serde_yaml_ng::from_str(
+            r#"
+id: count
+type: promptString
+pattern: '[1-9][0-9]?'
+validation_message: Enter a number from 1 to 99
+"#,
+        )
+        .unwrap();
+        input.validate().unwrap();
+        for value in ["", "1", "99"] {
+            input.validate_value(value).unwrap();
+        }
+        for value in ["0", "100", "x1", "1x", " 1", "1 ", "1\n"] {
+            assert!(input.validate_value(value).is_err(), "{value:?}");
+        }
+        assert!(
+            input
+                .validate_value("x")
+                .unwrap_err()
+                .to_string()
+                .contains("Enter a number from 1 to 99")
+        );
+        let mut required = input.clone();
+        required.required = true;
+        assert!(
+            required
+                .validate_value("")
+                .unwrap_err()
+                .to_string()
+                .contains("is required")
+        );
+        required.command = Some("printf 'default: invalid'".into());
+        required.validate().unwrap(); // Do not run generators at config load.
+        assert!(required.resolve().is_err());
+        required.command = Some("printf \"default: '42'\"".into());
+        assert_eq!(required.resolve().unwrap().initial(), "42");
+    }
+
+    #[test]
+    fn bundled_input_patterns_accept_formats_and_reject_malformed_values() {
+        let config =
+            Config::parse(&crate::config_defaults::defaults(false, false).unwrap()).unwrap();
+        for (name, id, good, bad) in [
+            (
+                "SOCKS",
+                "port",
+                vec!["1", "1080", "65535"],
+                vec!["0", "65536", "-1", "80/tcp"],
+            ),
+            (
+                "Tunnel",
+                "forward",
+                vec!["8080:localhost:80", "1:[::1]:65535"],
+                vec!["0:host:80", "8080:host:65536", "8080:host", "8080:$(id):80"],
+            ),
+            (
+                "Configure log limits and cleanup",
+                "disk",
+                vec!["512M", "1", "2G"],
+                vec!["0", "-1", "512MB", "1m", "1.5G"],
+            ),
+            (
+                "Configure log limits and cleanup",
+                "days",
+                vec!["1", "36499", "36500"],
+                vec!["0", "36501", "1.5", "-1"],
+            ),
+            (
+                "Configure log limits and cleanup",
+                "backups",
+                vec!["1", "99", "100"],
+                vec!["0", "101", "1.5"],
+            ),
+            (
+                "Configure log limits and cleanup",
+                "depth",
+                vec!["0", "5"],
+                vec!["6", "-1", "1.0"],
+            ),
+            (
+                "Configure firewall",
+                "ssh_ips",
+                vec!["", "192.0.2.1,2001:db8::/64", "192.0.2.0/24 2001:db8::1"],
+                vec!["not-an-ip", "192.0.2.1/abc", "$(id)"],
+            ),
+            (
+                "Configure firewall",
+                "ports",
+                vec!["", "80/tcp 53/udp", "8000-8010/tcp,65535/udp"],
+                vec![
+                    "0/tcp",
+                    "65536/udp",
+                    "70000/tcp",
+                    "80",
+                    "80/sctp",
+                    "80/tcp;",
+                ],
+            ),
+        ] {
+            let profile = config
+                .profiles
+                .iter()
+                .chain(&config.configuration_scripts)
+                .find(|p| p.name == name)
+                .unwrap();
+            let input = profile.inputs.iter().find(|i| i.id == id).unwrap();
+            for value in good {
+                input.validate_value(value).unwrap();
+            }
+            for value in bad {
+                assert!(input.validate_value(value).is_err(), "{name}/{id}: {value}");
+            }
         }
     }
 
@@ -1664,10 +1833,7 @@ command: printf '%s' '{"options":["one","two"],"default":"two","description":"Ge
             config.configuration_scripts[0].name,
             "Configure key-based auth"
         );
-        assert_eq!(
-            config.configuration_scripts[1].name,
-            "Configure key-based auth + install dotfiles"
-        );
+        assert_eq!(config.configuration_scripts[1].name, "Install dotfiles");
         assert!(
             config
                 .configuration_scripts

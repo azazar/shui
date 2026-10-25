@@ -1,5 +1,17 @@
 # Linux profile integration tests
 
+## Service recipes
+
+```sh
+python3 tests/docker/run.py --services --distro debian --distro fedora --timeout 2400
+```
+
+This opt-in mode uses privileged containers with private cgroup namespaces, without host networking or host filesystem mounts. Containers and test images are removed on completion or failure. It tests security-update scheduling and execution, real Docker/Podman process execution, journal ingestion/storage limits, archive/cache cleanup, and IPv4/IPv6 firewall traffic through an isolated network namespace. Container storage uses private tmpfs mounts to avoid overlay-on-overlay restrictions; the nested Podman workload disables cgroups because controllers may not be delegated in the test container.
+
+Recursive logging tests run real QEMU guest agents in two nested chroots. A virsh fixture supplies discovery and transport; guest execution and filesystem cleanup use the real agent protocol. This covers nested guest execution and inaccessible-agent reporting, but not full VM boot or libvirt domain discovery. Alpine is excluded because this test mode requires systemd. `--keep` retains resources for debugging.
+
+## Profiles and non-service recipes
+
 Run from the repository root with Docker, Python 3, and the pinned Rust toolchain:
 
 ```sh
@@ -30,7 +42,9 @@ Images track distribution updates rather than immutable digests so repository/pa
 | Zellij | Decline without installing; verified download into remote `~/.local/bin`; open one plain shell without startup dialogs, detach and reattach without adding tabs; start fresh after exit rather than resurrect suspended commands |
 | Monitor | Decline/accept btop installation; start actual btop with the shipped compact config; quit and verify temporary config cleanup; reuse without another prompt |
 | Configure key-based auth | Generate a real Ed25519 key through the recipe; accept an empty passphrase for the disposable test key; authenticate with it; reuse without duplicate authorized keys; reject overwriting it; verify every expiry duration, expired-key rejection, renewal and removal of expiry |
-| Key auth + dotfiles | Run real ssh-copy-id/scp/SSH; copy dotfiles including hidden files; execute a fixture installer and verify its remote result |
+| Install dotfiles | Use configured SSH authentication; copy dotfiles including hidden files; execute a fixture installer and verify its remote result |
+| Configure passwordless sudo | Add the test user to the administrative group, remove fixture privileges, and prove sudo runs as root without a password |
+| Configure SSH-agent sudo | Prove sudo authenticates with an authorized forwarded agent and fails without an agent when no password is supplied; verify package-unavailable failure on Alpine/Arch |
 | Copy terminal definition | Compile a unique system terminfo fixture for the root client, export/copy it through the recipe, verify it appears in the remote user's private database and temporary files are removed |
 
 The generated fixtures also include each profile's real `prepare_command`. No package-manager, SSH, tmux, btop or Zellij executables are mocked. A pseudo-terminal supplies known installation/password prompts and drives interactive applications. Downloads retain TLS and checksum verification; package signature checks stay enabled.

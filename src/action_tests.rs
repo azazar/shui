@@ -203,7 +203,7 @@ fn menu_action(action: &str, event: KeyEvent, mut config: launch::Config) {
     match action {
         "quit" | "connect" | "connect_and_return" => {}
         "connection_settings" => keys.push(key("Enter")),
-        "configure_remote" => keys.extend([key("Right"), key("Enter")]),
+        "configure_remote" => keys.extend([key("Space"), key("Enter")]),
         "new_remote" => keys.extend(
             "new.invalid"
                 .chars()
@@ -274,6 +274,16 @@ fn menu_action(action: &str, event: KeyEvent, mut config: launch::Config) {
 }
 
 fn dialog_action(action: &str, event: KeyEvent, config: launch::Config) {
+    if action == "toggle_recipe" {
+        let mut session = Session::new([event, key("Down"), key("Enter")]);
+        let selection = new_remote::dialog(&mut session, &config, Some(&host()), None)
+            .unwrap()
+            .unwrap();
+        session.done();
+        assert_eq!(selection.setup, Some(0));
+        assert!(selection.additional_setup.is_empty());
+        return;
+    }
     let mut keys = vec![event];
     match action {
         "cancel" | "connect" | "connect_and_return" => {}
@@ -450,11 +460,13 @@ fn releases_never_dispatch_actions_in_any_screen() {
                 let mut session = Session::new([event, key("Esc")]);
                 match scope {
                     "menu" => assert!(session.menu(&mut config, false).is_none()),
-                    "dialog" => assert!(
-                        new_remote::connect(&mut session, &config, &host(), 2, false)
-                            .unwrap()
-                            .is_none()
-                    ),
+                    "dialog" => {
+                        assert!(
+                            new_remote::connect(&mut session, &config, &host(), 2, false)
+                                .unwrap()
+                                .is_none()
+                        )
+                    }
                     "help" => help::show(&mut session, help::Context::Hosts, &config).unwrap(),
                     "editor" => {
                         session.fail_edits = 1;
@@ -511,7 +523,7 @@ fn repeated_navigation_works_and_repeated_launches_do_not() {
 fn dialog_modes_validation_and_locked_fields_have_observable_outcomes() {
     let config = launch::Config::parse(CONFIG).unwrap();
     // Existing-host setup requires a recipe; switching modes preserves each draft.
-    let mut session = Session::new([key("Enter"), key("Right"), key("Enter")]);
+    let mut session = Session::new([key("Enter"), key("Space"), key("Enter")]);
     let selection = new_remote::dialog(&mut session, &config, Some(&host()), None)
         .unwrap()
         .unwrap();
@@ -527,7 +539,7 @@ fn dialog_modes_validation_and_locked_fields_have_observable_outcomes() {
             key(direction),
             key("Tab"),
             key("Tab"),
-            key("Right"),
+            key("Space"),
             key("Enter"),
         ]);
         let selection = new_remote::dialog(&mut session, &config, Some(&host()), None)
@@ -563,6 +575,107 @@ fn dialog_modes_validation_and_locked_fields_have_observable_outcomes() {
         session.done();
         assert_eq!(selection.target, host());
     }
+}
+
+#[test]
+fn setup_queue_preserves_order_inputs_and_unchecking() {
+    let config = launch::Config::parse(
+        r#"
+default: SSH
+profiles: [{name: SSH, command: 'ssh %h'}]
+configuration_scripts:
+  - name: First
+    command: 'first %{input:value}'
+    inputs: [{id: value, type: promptString, required: true}]
+  - name: Second
+    command: 'second %h'
+"#,
+    )
+    .unwrap();
+    let mut session = Session::new([
+        key("Down"),
+        key("Space"), // queue second first
+        key("Up"),
+        key("Space"),
+        key("Enter"), // first has a missing input
+        key("x"),
+        key("Space"),
+        key("y"),
+        key("Shift+Tab"),
+        key("Enter"),
+    ]);
+    let selection = new_remote::dialog(&mut session, &config, Some(&host()), None)
+        .unwrap()
+        .unwrap();
+    session.done();
+    session.saw("value is required");
+    assert_eq!(selection.setup, Some(0));
+    assert_eq!(
+        command_args(selection.setup_command.unwrap()),
+        ["first", "x y"]
+    );
+    assert_eq!(selection.additional_setup.len(), 1);
+    assert_eq!(selection.additional_setup[0].0, 1);
+
+    let mut session = Session::new([key("Space"), key("Space"), key("Enter"), key("Esc")]);
+    assert!(
+        new_remote::dialog(&mut session, &config, Some(&host()), None)
+            .unwrap()
+            .is_none()
+    );
+    session.done();
+    session.saw("Choose a setup recipe");
+}
+
+#[test]
+fn pattern_errors_keep_dialogs_open_and_focus_the_invalid_input() {
+    let config = launch::Config::parse(r#"
+default: Input
+profiles:
+  - name: Input
+    command: 'ssh %h %{input:count}'
+    inputs: [{id: count, type: promptString, pattern: '[1-9]', validation_message: Use a digit from 1 to 9}]
+configuration_scripts:
+  - {name: First, command: 'first %h'}
+  - name: Second
+    command: 'second %{input:count}'
+    inputs: [{id: count, type: promptString, pattern: '[1-9]', validation_message: Use a digit from 1 to 9}]
+"#).unwrap();
+    let mut session = Session::new(
+        [
+            "Space",
+            "Down",
+            "Space",
+            "Down",
+            "x",
+            "Enter",
+            "Backspace",
+            "4",
+            "Enter",
+        ]
+        .map(key),
+    );
+    let selection = new_remote::dialog(&mut session, &config, Some(&host()), None)
+        .unwrap()
+        .unwrap();
+    session.done();
+    session.saw("Use a digit from 1 to 9");
+    assert_eq!(selection.setup, Some(0));
+    assert_eq!(
+        command_args(selection.additional_setup[0].1.clone()),
+        ["second", "4"]
+    );
+
+    let mut session = Session::new(["x", "Enter", "Backspace", "5", "Enter"].map(key));
+    let selection = new_remote::connect(&mut session, &config, &host(), 0, false)
+        .unwrap()
+        .unwrap();
+    session.done();
+    session.saw("Use a digit from 1 to 9");
+    assert_eq!(
+        command_args(selection.connection_command.unwrap()),
+        ["ssh", "action-test.invalid", "5"]
+    );
 }
 
 #[test]

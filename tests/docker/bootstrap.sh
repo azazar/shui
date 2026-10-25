@@ -66,3 +66,9 @@ useradd -m -U -s /bin/sh remote
 printf 'remote:shui-test-password\n' | chpasswd
 printf 'Defaults env_keep += "http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY"\nremote ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/shui-test
 chmod 440 /etc/sudoers.d/shui-test
+# Some minimal images ship the vendor sudoers file without its required mode.
+# Establish a valid sudo baseline before exercising configuration recipes.
+for file in /etc/sudoers /usr/etc/sudoers; do
+  [ ! -f "$file" ] || chmod 440 "$file"
+done
+visudo -c

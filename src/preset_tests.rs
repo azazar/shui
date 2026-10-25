@@ -309,7 +309,11 @@ fn shipped_transports_preserve_ports_and_tunnel_arguments() {
         }
     }
     let value = "8080:$(touch injected);'host:80";
-    let out = stdout(env.run(&profile("Tunnel"), None, Some(("forward", value))));
+    let mut tunnel = profile("Tunnel");
+    assert!(tunnel.inputs[0].validate_value(value).is_err());
+    // Custom recipes can omit validation; argument quoting must still be safe.
+    tunnel.inputs[0].pattern = None;
+    let out = stdout(env.run(&tunnel, None, Some(("forward", value))));
     assert!(out.contains(&format!("<127.0.0.1:{value}>")));
     assert!(!env.0.join("injected").exists());
 }
@@ -543,16 +547,11 @@ fn key_expiry_updates_all_matching_entries_and_preserves_restrictions() {
             .to_string_lossy()
             .starts_with(".shui-expiry.")
     }));
-    // Both shipped recipes share the same picker and updater.
-    let dotfiles = profile("Configure key-based auth + install dotfiles");
-    assert_eq!(p.fields["set_expiry"], dotfiles.fields["set_expiry"]);
-    assert_eq!(
+    let dotfiles = profile("Install dotfiles");
+    assert!(
         dotfiles
             .inputs
             .iter()
-            .find(|i| i.id == "expiry")
-            .unwrap()
-            .options,
-        ["never", "8 hours", "day", "week", "month", "year"]
+            .all(|i| i.id != "key" && i.id != "expiry")
     );
 }
