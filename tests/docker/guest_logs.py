@@ -50,6 +50,7 @@ def rootfs(root, identity):
         "dev",
         "root/.cache",
         "usr/local/bin",
+        "tmp",
     ):
         (root / directory).mkdir(parents=True, exist_ok=True)
     stdlib = Path(sysconfig.get_path("stdlib"))
@@ -59,6 +60,29 @@ def rootfs(root, identity):
         "/bin/sh",
         shutil.which("logrotate"),
         shutil.which("qemu-ga"),
+        *[
+            shutil.which(tool)
+            for tool in (
+                "bash",
+                "jq",
+                "find",
+                "timeout",
+                "cat",
+                "chmod",
+                "dirname",
+                "mktemp",
+                "mv",
+                "rm",
+                "sed",
+                "awk",
+                "sort",
+                "date",
+                "base64",
+                "sleep",
+                "tail",
+                "getent",
+            )
+        ],
     ]
     copied = set()
 

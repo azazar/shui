@@ -22,14 +22,14 @@ The included setup recipes are:
 | **Configure key-based auth** | Selects an existing keypair or offers generation when none is available, then copies its public key with ssh-copy-id |
 | **Install dotfiles** | Uses the configured SSH authentication to upload a dotfiles directory and run its installer |
 | **Configure passwordless sudo** | Writes `/etc/sudoers.d/nopasswd` for the distro's administrative group (`sudo` on Debian/Ubuntu, `wheel` on the other supported distros) |
-| **Configure SSH-agent sudo** | Installs the packaged PAM module and authorizes the forwarded agent's public keys for sudo |
+| **Configure SSH-agent sudo** | Installs the needed PAM module and authorizes the forwarded agent's public keys |
 | **Configure automatic security updates** | Enables daily security-only updates on supported systemd distributions |
-| **Install Docker / Podman** | Installs the selected engine and starts Docker when selected |
+| **Install Docker / Podman** | Installs the selected engine, enables/starts Docker when selected, and verifies it works |
 | **Configure log limits and cleanup** | Configures journal, text, container and VM log limits; cleans archives and optional caches, with optional recursive guest maintenance |
 | **Configure firewall** | Configures the distro firewall with optional SSH source restrictions and additional allowed ports |
 | **Copy terminal definition** | Exports local `$TERM` and compiles it into remote `~/.terminfo` for terminals unknown to the server |
 
-The dotfiles sample defaults to local `~/src/dotfiles`, installer `install.sh`, and shell `sh`. Change the dialog values or edit the recipe for your own repository. It uses normal SSH configuration and authentication; configure access first if needed. The key-auth recipe remains available when no matching `~/.ssh/id_*` private/public keypairs exist. The key selector reads filenames, not key contents. If no usable pair is found, it offers **Generate new Ed25519 key** instead.
+The dotfiles sample defaults to local `~/src/dotfiles`, installer `install.sh`, and shell `sh`. Change the dialog values or edit the recipe for your own repository. Selecting `bash` installs it remotely if missing, using root or sudo. Dependencies of your own installer remain its responsibility. The recipe uses normal SSH configuration and authentication; configure access first if needed. The key-auth recipe remains available when no matching `~/.ssh/id_*` private/public keypairs exist. The key selector reads filenames, not key contents. If no usable pair is found, it offers **Generate new Ed25519 key** instead.
 
 Generation runs only after confirming setup, never while opening or canceling the dialog. It uses `ssh-keygen` to create the standard `~/.ssh/id_ed25519` pair, with the terminal restored for its passphrase prompts. No empty passphrase is forced. Existing private or public files (including symlinks) are not overwritten; restore an incomplete pair or choose another existing pair before retrying. Failure stops setup before `ssh-copy-id` or the connection runs. The generated key remains on disk if later setup fails.
 
@@ -45,39 +45,41 @@ Setup starts with no recipes checked. Configure mode requires a recipe; adding a
 
 ## Terminal compatibility
 
-Launch profiles handle their own tool dependencies. Select Monitor, Tmux, Mosh, or another profile to check and optionally install what it needs; tool installation is not a host setup recipe.
+Launch profiles only run their named tools; install their prerequisites separately. Setup/configuration recipes install dependencies and enable/start services needed for their stated task. They do not run unrelated full-system upgrades or change unrelated application settings. Safety checks, validation, and explicitly selected recipe options still apply.
 
-**Copy terminal definition** addresses errors such as `unknown terminal: xterm-kitty`. It uses the method documented by [Kitty](https://github.com/kovidgoyal/kitty/blob/master/docs/kittens/ssh.rst), generalized to the current `$TERM`. Local `infocmp` and remote `tic` (ncurses tools) are required. The remote compiles a temporary source file, which also works on systems whose tic cannot read `/dev/stdin`, and removes it afterward. Matching definitions in `~/.terminfo` are updated; system definitions are untouched. The recipe is hidden if local ssh, infocmp or TERM is missing. It copies terminal capabilities, not fonts or shell integration.
+**Copy terminal definition** addresses errors such as `unknown terminal: xterm-kitty`. It uses the method documented by [Kitty](https://github.com/kovidgoyal/kitty/blob/master/docs/kittens/ssh.rst), generalized to the current `$TERM`. Local `infocmp` is required; missing remote `tic` is installed from distro ncurses packages through a terminal-attached preparation connection. The remote then compiles a temporary source file, which also works on systems whose tic cannot read `/dev/stdin`, and removes it afterward. Matching definitions in `~/.terminfo` are updated; system definitions are untouched. The recipe is hidden if local ssh, infocmp or TERM is missing. It copies terminal capabilities, not fonts or shell integration.
 
 The terminal-definition recipe uses existing authentication; configure key-based auth first or authenticate normally when prompted.
 
 ## Sudo recipes
 
-Both recipes require root access or working sudo. Passwordless sudo grants the administrative group all commands without a password; it does not add the login user to that group. Sudoers fragments are validated with `visudo`, and a failed full validation restores the previous fragment.
+Both recipes require root access or working sudo. When connected as root, missing sudo is installed as needed. Passwordless sudo grants the distro's administrative group all commands without a password, creating that group if missing; it does not add the login user to it. Sudoers fragments are validated with `visudo`, and a failed full validation restores the previous fragment.
 
-SSH-agent sudo uses `ssh -A` during setup and requires keys already loaded in the local agent. It records those public keys in root-owned `/etc/security/ssh-agent-sudo/<user>`, preserves `SSH_AUTH_SOCK` through sudo, and sets `timestamp_timeout=0`. It prepends its authentication rule to the existing `sudo` and, when present, `sudo-i` PAM files, preserving the distro's password/account/session stack. PAM backups use the `.shui-backup` suffix. Re-running replaces this user's allowed agent keys with the currently loaded keys.
+SSH-agent sudo uses `ssh -A` during setup and requires keys already loaded in the local agent. It installs the packaged `pam_ssh_agent_auth` module when missing. It records those public keys in root-owned `/etc/security/ssh-agent-sudo/<user>` and preserves `SSH_AUTH_SOCK` through sudo for that user. It prepends its authentication rule to the existing `sudo` and, when present, `sudo-i` PAM files, preserving the distro's password/account/session stack. PAM backups use the `.shui-backup` suffix. Re-running replaces this user's allowed agent keys with the currently loaded keys. Existing sudo timestamp caching is unchanged.
 
-The recipe disables sudo's `targetpw`, `rootpw`, and `runaspw` defaults so authentication uses the invoking user's agent keys or password, including on openSUSE.
+The per-user `/etc/sudoers.d/ssh-agent-auth-<user>` fragment disables `targetpw`, `rootpw`, and `runaspw` only for this user, so PAM can authenticate their agent or password. It does not change other users' sudo policy.
+
+Previously applied configuration is not automatically undone. If an older recipe created a global `/etc/sudoers.d/ssh-agent-auth` fragment, review it separately before removing or replacing its settings.
 
 Forward the agent on subsequent connections to use this authentication (for example, configure `ForwardAgent yes` for the host). This recipe does not grant sudo privileges; existing sudo policy still applies. NOPASSWD rules take precedence when both recipes are enabled.
 
-Package installation supports apt, dnf, zypper, pacman, and apk. Only enabled distro repositories are used: there are no source builds or automatic third-party repository additions. If the package is unavailable (including the tested Alpine, Arch, and Fedora 43 repositories), setup fails before writing PAM or sudoers configuration. A preinstalled module can also be used.
+The recipe uses distro packages only: `libpam-ssh-agent-auth` on Debian/Ubuntu, `pam_ssh_agent_auth` on RPM distributions, or the equivalent package. Availability depends on enabled repositories. If unavailable, setup fails before writing PAM or sudoers configuration; no source builds or third-party repositories are added.
 
 ## Automatic security updates
 
 **Configure automatic security updates** enables a daily systemd timer with a randomized delay of up to one hour and catch-up after downtime. It uses security-only unattended-upgrades origins on Debian/Ubuntu, `dnf upgrade --security` on Fedora/RHEL derivatives, and security patches on openSUSE Leap/SLES. Other distributions, including Arch, Alpine and openSUSE Tumbleweed, report unsupported rather than enabling full unattended upgrades. Security classification on RPM systems depends on the enabled repositories' advisory metadata.
 
-The recipe writes `shui-security-updates.service` and `.timer` under `/etc/systemd/system`, plus `/etc/apt/apt.conf.d/52shui-security-updates` on Debian/Ubuntu. It does not trigger an immediate upgrade or automatic reboot. Existing unrelated update schedulers remain enabled.
+The recipe writes `shui-security-updates.service` and `.timer` under `/etc/systemd/system`, plus `/etc/apt/apt.conf.d/52shui-security-updates` on Debian/Ubuntu (installing `unattended-upgrades` if needed). It does not trigger an immediate upgrade or automatic reboot. Existing unrelated update schedulers remain enabled.
 
 ## Container engines
 
 **Install Docker / Podman** offers an engine dropdown. Packages come from enabled distribution repositories; missing packages cause an installation error. Docker uses `docker.io` on Debian/Ubuntu, `moby-engine` on Fedora/RHEL derivatives where available, and `docker` elsewhere. Podman uses `podman`.
 
-Docker is enabled and started using systemd or Alpine's OpenRC. The recipe verifies the chosen engine with `docker info` or `podman info`. It does not add users to the Docker group or configure rootless Podman. On repositories without Docker/Moby, choose Podman or enable an appropriate repository yourself.
+Docker is enabled and started through systemd or Alpine's OpenRC, then verified with `docker info`. Podman is daemonless and is verified with `podman info`. The recipe does not add users to groups, configure rootless Podman, or run a full-system upgrade. On repositories without Docker/Moby, choose Podman or enable an appropriate repository yourself.
 
 ## Log limits and cleanup
 
-**Configure log limits and cleanup** handles detected host logging systems and optionally running libvirt guests. Python 3 and logrotate are installed from the distro repositories when missing.
+**Configure log limits and cleanup** uses a Bash script and native logging/filesystem tools on the host and optional running libvirt guests. Missing Bash, jq, logrotate, coreutils and GNU findutils are installed from distro repositories. No embedded Python is used; jq handles Docker configuration and QEMU-agent JSON safely.
 
 Inputs:
 
@@ -108,7 +110,7 @@ Recursive mode uses the system libvirt connection and requires working guest age
 
 ## Firewall
 
-**Configure firewall** uses UFW on Debian/Ubuntu and firewalld on Fedora/RHEL derivatives, openSUSE and Arch. It requires systemd. It keeps existing allowed services and adds default-deny inbound filtering; outgoing traffic, established connections and the distro's standard loopback/ICMP handling remain available.
+**Configure firewall** uses a POSIX shell script and installs UFW on Debian/Ubuntu or firewalld on Fedora/RHEL derivatives, openSUSE and Arch, plus jq and iproute2 (named `iproute` on Fedora/RHEL). It requires systemd. iproute2 validates numeric addresses/prefixes without changing routes; jq preserves managed-rule JSON state. Only necessary packages are installed, without a full-system upgrade. Existing allowed services remain; incoming traffic is default-deny, while outgoing traffic, established connections and standard loopback/ICMP handling remain available.
 
 - **SSH allowed IPs/CIDRs**: comma- or whitespace-separated IPv4/IPv6 addresses or networks. Blank allows SSH from any address. The server-side port is obtained from the current SSH connection, including nonstandard ports and SSH aliases.
 - **Additional ports**: comma- or whitespace-separated entries such as `80/tcp 443/tcp 53/udp 8000-8010/tcp`. The SSH port must be configured through the SSH source field, not this list.

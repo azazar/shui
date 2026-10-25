@@ -24,11 +24,11 @@ Find a machine, choose how to connect, and press Enter. Shui brings your SSH hos
 | **Zellij** | Alt+Z | An existing remote session, or a new session if none exists |
 | **Tmux** | Alt+T | Attach to the remote `main` session, creating it if needed |
 | **SFTP** | Alt+F | An interactive file-transfer session |
-| **Monitor** | Alt+H | Compact health dashboard: CPU, memory, disks, network and supported GPUs |
+| **Monitor** | Alt+H | Remote btop with your normal configuration |
 | **Tunnel / SOCKS** | Ctrl+Alt+L / Ctrl+Alt+D | A localhost port forward or SOCKS proxy, with editable settings |
 | **Your own profile** | Configurable | Any command or remote script defined in YAML |
 
-Hosts come from SSH config, Bash history, and Midnight Commander bookmarks. Shui remembers each host's launch profile. Setup recipes can install tools, configure SSH keys, copy terminal definitions, and deploy dotfiles. Profiles appear when their local clients are installed; remote tools can be installed when you need them.
+Hosts come from SSH config, Bash history, and Midnight Commander bookmarks. Shui remembers each host's launch profile. Setup recipes can install container engines, configure SSH keys, copy terminal definitions, and deploy dotfiles, installing needed dependencies and starting relevant services. Connection profiles only launch tools: install their prerequisites separately.
 
 ## Installation
 

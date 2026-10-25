@@ -56,9 +56,7 @@ Launching appends its command to an existing `.bash_history`; adding a remote cr
 
 ## How the Zellij profile works
 
-The recipe attaches to a live remote session, or opens one plain terminal pane in a single new tab. It skips exited sessions, uses a clean configuration without the first-run wizard, startup tips or release notes, and does not add tabs when reconnecting. Remote Zellij config files are left unchanged. It reuses an installed Zellij; otherwise it offers to install pinned **0.45.1** into remote `~/.local/bin` and verifies the executable's SHA-256 against the published checksum. It uses no sudo and leaves existing installations in place.
-
-Automatic installation supports Linux x86-64 and ARM64 and requires `tar`, `curl` or `wget`, and `sha256sum` or `shasum`. See the [Zellij recipe in the config](config.example.yml) for the complete recipe.
+The profile runs `zellij attach --create options --show-startup-tips false --show-release-notes false` on the remote host. No session name is forced; Zellij handles session selection/creation normally. Zellij must already be on the remote PATH. Startup tips and release notes are disabled for this launch; normal layouts and other settings apply. Shui does not download Zellij or modify its configuration files.
 
 ## Built-in help
 

@@ -31,23 +31,23 @@ The runner exports fixtures through the app's Rust configuration parser and comm
 | Arch Linux | `archlinux:base` | pacman |
 | openSUSE Tumbleweed | `opensuse/tumbleweed:latest` | zypper |
 
-Images track distribution updates rather than immutable digests so repository/package changes are exercised. Bootstrap installs test prerequisites: Python, SSH, sudo, certificates, download/archive tools, process tools, diffutils (`cmp` for the dotfiles fixture and key-expiry updater), and ncurses. Rocky enables EPEL, where btop is packaged. tmux, btop and Zellij are deliberately absent. Bash is also absent on Alpine initially.
+Images track distribution updates rather than immutable digests so repository/package changes are exercised. Bootstrap installs test prerequisites: Python, SSH, sudo, certificates, download/archive tools, process tools, diffutils, ncurses, Bash, tmux and btop. Rocky enables EPEL for btop. The harness provisions checksum-verified Zellij 0.45.1; no launch profile installs or downloads software.
 
 ## Coverage
 
 | Shipped entry | Assertions |
 | --- | --- |
-| SSH / Bash | Real interactive SSH shell, target home, explicit port overriding the SSH config; Bash install when absent |
-| Tmux | Decline missing-tool installation; accept and install through the distro package manager; create, detach and reconnect to the same session |
-| Zellij | Decline without installing; verified download into remote `~/.local/bin`; open one plain shell without startup dialogs, detach and reattach without adding tabs; start fresh after exit rather than resurrect suspended commands |
-| Monitor | Decline/accept btop installation; start actual btop with the shipped compact config; quit and verify temporary config cleanup; reuse without another prompt |
+| SSH / Bash | Real interactive shell, target home, explicit port overriding SSH config; no dependency installation |
+| Tmux | Create, detach and reconnect to the same session using preinstalled tmux |
+| Zellij | Create, detach and reattach using preinstalled Zellij, without forcing a session name; startup tips/release notes are disabled |
+| Monitor | Start and quit preinstalled btop without a profile-supplied configuration |
 | Configure key-based auth | Generate a real Ed25519 key through the recipe; accept an empty passphrase for the disposable test key; authenticate with it; reuse without duplicate authorized keys; reject overwriting it; verify every expiry duration, expired-key rejection, renewal and removal of expiry |
 | Install dotfiles | Use configured SSH authentication; copy dotfiles including hidden files; execute a fixture installer and verify its remote result |
 | Configure passwordless sudo | Add the test user to the administrative group, remove fixture privileges, and prove sudo runs as root without a password |
-| Configure SSH-agent sudo | Prove sudo authenticates with an authorized forwarded agent and fails without an agent when no password is supplied; verify package-unavailable failure on Alpine/Arch |
+| Configure SSH-agent sudo | Prove authorized-agent authentication and password fallback, reject missing/untrusted agents, preserve timestamp caching and other users' auth policy; verify package-unavailable handling |
 | Copy terminal definition | Compile a unique system terminfo fixture for the root client, export/copy it through the recipe, verify it appears in the remote user's private database and temporary files are removed |
 
-The generated fixtures also include each profile's real `prepare_command`. No package-manager, SSH, tmux, btop or Zellij executables are mocked. A pseudo-terminal supplies known installation/password prompts and drives interactive applications. Downloads retain TLS and checksum verification; package signature checks stay enabled.
+No package-manager, SSH, tmux, btop or Zellij executables are mocked. A pseudo-terminal supplies known setup/password prompts and drives interactive applications. Harness downloads retain TLS and checksum verification; package signature checks stay enabled.
 
 Bootstrap checks for `awk`, `cmp`, `tic`, and `infocmp`; openSUSE explicitly installs gawk and ncurses-devel for the terminfo tools. The loopback SSH fixture disables per-source penalties when supported because the expiry tests deliberately attempt rejected authentication. The terminfo check uses the root client's system database and verifies the remote user's private database explicitly, accommodating ncurses builds that ignore root's home directory.
 

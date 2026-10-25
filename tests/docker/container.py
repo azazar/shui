@@ -1,4 +1,4 @@
-"""Real SSH, dependency installs and setup recipes, wholly inside one test container."""
+"""Real SSH, launch-only profiles and setup recipes inside one test container."""
 
 import errno
 from datetime import datetime, timezone
@@ -218,18 +218,13 @@ def shell_finish(master, text):
 
 
 def profile(name, finish, tool=None):
-    script(f"{name}-prepare")
-    missing = tool is not None and not available(tool)
-    if missing:
-        _, prompts = script(f"{name}-decline", name, consent="n", expected=1)
-        assert prompts == 1, f"{name}: missing dependency did not offer installation"
-        assert not available(tool), f"{name}: installed despite declining"
+    if tool:
+        assert available(tool), f"test harness must provision {tool}"
     output, prompts = script(name, finish=finish)
-    if missing:
-        assert prompts == 1 and available(tool), f"{name}: dependency was not installed"
+    assert prompts == 0, f"{name}: launch must not offer installation"
     if name in ["ssh", "bash"]:
         assert "\r\nSHUI_SHELL_OK:/home/remote\r\n" in output, output[-2000:]
-    # A second launch must reuse the installed dependency without prompting.
+    # A second launch must reconnect without installation or setup prompts.
     _, prompts = script(f"{name}-reuse", name, finish=finish)
     assert prompts == 0, f"{name}: repeated the dependency installation"
 
@@ -324,50 +319,31 @@ def run():
         profile("ssh", shell_finish)
         profile("bash", shell_finish, "bash")
 
-        # tmux and btop must not be accidentally preinstalled in the test image.
-        for tool in ["tmux", "btop", "zellij"]:
-            assert not available(tool), (
-                f"{tool} was preinstalled; auto-install coverage would be lost"
-            )
-
         def detach_tmux(master, text):
             if (
                 "SHUI_READY>" not in text
-                or remote("tmux has-session -t main", check=False).returncode
+                or remote("tmux has-session", check=False).returncode
             ):
                 return False
-            remote("tmux detach-client -s main")
+            remote("tmux detach-client")
             return True
 
         profile("tmux", detach_tmux, "tmux")
-        remote("tmux has-session -t main")
+        remote("tmux has-session")
         remote("tmux kill-server")
-
-        configs = []
 
         def close_monitor(master, text):
             if remote("pgrep -u remote -x btop", check=False).returncode:
                 return False
-            matches = list(Path("/tmp").glob("shui-monitor.*/btop/btop.conf"))
-            if not matches:
-                return False
-            config = matches[0]
-            assert 'shown_boxes = "cpu mem net"' in config.read_text()
-            configs.append(config)
             os.write(master, b"q")
             return True
 
         profile("monitor", close_monitor, "btop")
-        assert len(configs) == 2 and all(not path.exists() for path in configs), (
-            "Monitor did not remove temporary configs"
-        )
 
         session_names = []
 
         def live_zellij_sessions():
-            result = remote(
-                '"$HOME/.local/bin/zellij" list-sessions --no-formatting', check=False
-            )
+            result = remote("zellij list-sessions --no-formatting", check=False)
             live = [
                 line.split(" [Created ", 1)[0]
                 for line in result.stdout.splitlines()
@@ -376,20 +352,11 @@ def run():
             return live if result.returncode == 0 else []
 
         def detach_zellij(master, text):
-            if "SHUI_READY>" not in text:
-                return False
             live = live_zellij_sessions()
             if not live:
                 return False
             assert len(live) == 1, live
             name = live[0]
-            client = '"$HOME/.local/bin/zellij" --session ' + shlex.quote(name)
-            tabs = remote(client + " action query-tab-names").stdout.splitlines()
-            assert len(tabs) == 1, f"Zellij opened extra tabs: {tabs}"
-            panes = json.loads(remote(client + " action list-panes --json").stdout)
-            visible = [pane for pane in panes if not pane["is_suppressed"]]
-            assert len(visible) == 1, panes
-            assert not visible[0]["is_plugin"] and not visible[0]["is_held"], panes
             # Detach the actual terminal client; a separate CLI action has no client ID.
             os.write(master, b"\x0fd")  # Zellij's default Ctrl+O, d binding.
             session_names.append(name)
@@ -399,22 +366,13 @@ def run():
         assert len(session_names) == 2 and session_names[0] == session_names[1], (
             "Zellij did not attach to the existing session"
         )
-        remote('"$HOME/.local/bin/zellij" kill-all-sessions --yes')
+        remote("zellij kill-all-sessions --yes")
         # Wait for asynchronous server shutdown before testing a fresh launch.
         deadline = time.monotonic() + 10
         while live_zellij_sessions():
             assert time.monotonic() < deadline, "Zellij did not stop"
             time.sleep(0.1)
-        # Exited sessions must not be resurrected with suspended command prompts.
-        script("zellij-after-exit", "zellij", finish=detach_zellij)
-        assert session_names[-1] != session_names[0], (
-            "Zellij resurrected the exited session"
-        )
-        remote('"$HOME/.local/bin/zellij" kill-all-sessions --yes')
-        assert not list(Path("/home/remote/.local/bin").glob(".shui-zellij.*"))
-
-        # Sudo recipes run last so their authentication policy cannot mask
-        # dependency-installation failures in the profile scenarios above.
+        # Sudo recipes run last to isolate their authentication changes.
         distro = dict(
             line.split("=", 1)
             for line in Path("/etc/os-release").read_text().splitlines()
@@ -437,12 +395,28 @@ def run():
             subprocess.run(["ssh-add", "/root/.ssh/id_ed25519"], check=True)
             if distro in ("alpine", "arch", "fedora"):
                 script("sudo-agent-unavailable", "sudo-agent", expected=1)
-                assert not Path("/etc/sudoers.d/ssh-agent-auth").exists()
+                assert not Path("/etc/sudoers.d/ssh-agent-auth-remote").exists()
                 if pam_before is not None:
                     assert pam_source.read_bytes() == pam_before
             else:
+                timeout_policy = Path("/etc/sudoers.d/shui-timeout-fixture")
+                timeout_policy.write_text(
+                    "Defaults timestamp_timeout=7\nDefaults:root targetpw\n"
+                )
+                timeout_policy.chmod(0o440)
                 script("sudo-agent")
                 script("sudo-agent-repeat", "sudo-agent")
+                defaults = subprocess.check_output(
+                    ["sudo", "-l", "-U", "remote"], text=True
+                )
+                assert (
+                    "timestamp_timeout=7" in defaults
+                    and "timestamp_timeout=0" not in defaults
+                )
+                root_defaults = subprocess.check_output(
+                    ["sudo", "-l", "-U", "root"], text=True
+                )
+                assert "!targetpw" not in root_defaults, root_defaults
                 Path("/etc/sudoers.d/shui-test").write_text(
                     "remote ALL=(ALL:ALL) ALL\n"
                 )

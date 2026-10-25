@@ -294,8 +294,10 @@ fn shipped_transports_preserve_ports_and_tunnel_arguments() {
             format!("{sftp_port}<-->\n<user@host>\n")
         );
         let tmux = stdout(env.run(&profile("Tmux"), port, None));
-        assert!(tmux.starts_with(&format!("{ssh_port}<-tt>\n<-->\n<user@host>\n<sh -c ")));
-        assert!(tmux.contains("exec tmux new-session -A -s main"));
+        assert!(tmux.starts_with(&format!(
+            "{ssh_port}<-tt>\n<-->\n<user@host>\n<tmux attach-session"
+        )));
+        assert!(tmux.contains("exec tmux new-session"));
         for (name, flag, value) in [("Tunnel", "L", "8080:localhost:80"), ("SOCKS", "D", "1080")] {
             let out = stdout(env.run(&profile(name), port, None));
             assert!(out.contains(&format!("{ssh_port}<-N>\n<-T>")), "{out}");
@@ -319,7 +321,7 @@ fn shipped_transports_preserve_ports_and_tunnel_arguments() {
 }
 
 #[test]
-fn monitor_uses_isolated_dashboard_and_cleans_up_on_failure() {
+fn monitor_uses_existing_configuration_and_propagates_failure() {
     let env = Sandbox::new("monitor");
     for tool in ["cat", "mktemp", "mkdir", "rm"] {
         env.link(tool);
@@ -331,15 +333,12 @@ fn monitor_uses_isolated_dashboard_and_cleans_up_on_failure() {
     }
     let missing = env.run(&p, None, None);
     assert!(!missing.status.success());
-    assert!(String::from_utf8_lossy(&missing.stderr).contains("btop is missing on the remote"));
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("btop"));
     fs::create_dir_all(env.0.join(".config/btop")).unwrap();
     let personal = env.0.join(".config/btop/btop.conf");
     fs::write(&personal, "personal configuration").unwrap();
-    env.stub("btop", "cat \"$XDG_CONFIG_HOME/btop/btop.conf\"");
-    assert_eq!(
-        stdout(env.run(&p, None, None)),
-        format!("{}\n", p.fields["dashboard"])
-    );
+    env.stub("btop", "cat \"$HOME/.config/btop/btop.conf\"");
+    assert_eq!(stdout(env.run(&p, None, None)), "personal configuration");
     env.stub("btop", "exit 42");
     assert_eq!(env.run(&p, None, None).status.code(), Some(42));
     assert_eq!(
@@ -355,48 +354,192 @@ fn monitor_uses_isolated_dashboard_and_cleans_up_on_failure() {
 }
 
 #[test]
-fn profile_installer_selects_manager_and_propagates_failure() {
-    let env = Sandbox::new("packages");
-    env.stub("id", "echo 1000");
-    env.stub("sudo", "printf 'sudo\\n'; shift; exec \"$@\"");
-    let mut p = profile("SSH");
-    p.command = "sh -c %{install} -- tmux tmux".into();
-    assert!(!env.run(&p, None, None).status.success());
-    for (manager, args) in [
-        ("brew", "install"),
-        ("apt-get", "install"),
-        ("dnf", "install"),
-        ("yum", "install"),
-        ("pacman", "-S\n--needed"),
-        ("zypper", "install"),
-        ("apk", "add"),
+fn remote_profiles_only_launch_the_named_application() {
+    let env = Sandbox::new("launch-only");
+    for tool in [
+        "apt-get", "dnf", "yum", "pacman", "zypper", "apk", "brew", "sudo", "curl", "wget",
     ] {
-        env.stub(manager, "printf '%s\\n' \"$@\"");
-        let prefix = if manager == "brew" { "" } else { "sudo\n" };
-        assert_eq!(
-            stdout(env.run(&p, None, None)),
-            format!("{prefix}{args}\ntmux\n")
-        );
-        p.command = "sh -c %{install} -- openssh sftp".into();
-        let package = match manager {
-            "apt-get" => "openssh-client",
-            "dnf" | "yum" => "openssh-clients",
-            "apk" => "openssh-sftp-client",
-            _ => "openssh",
-        };
-        assert_eq!(
-            stdout(env.run(&p, None, None)),
-            format!("{prefix}{args}\n{package}\n")
-        );
-        p.command = "sh -c %{install} -- tmux tmux".into();
-        env.stub(manager, "exit 42");
-        assert_eq!(env.run(&p, None, None).status.code(), Some(42));
-        fs::remove_file(env.0.join("bin").join(manager)).unwrap();
+        env.stub(tool, "echo unexpected > \"$HOME/side-effect\"; exit 99");
     }
+    for (name, tool, expected) in [
+        ("Bash", "bash", "<-l>\n"),
+        ("Tmux", "tmux", "<attach-session>\n"),
+        (
+            "Zellij",
+            "zellij",
+            "<attach>\n<--create>\n<options>\n<--show-startup-tips>\n<false>\n<--show-release-notes>\n<false>\n",
+        ),
+        ("Monitor", "btop", "<>\n"),
+    ] {
+        let mut p = profile(name);
+        p.command = "sh -c %{remote}".into();
+        assert!(
+            !env.run(&p, None, None).status.success(),
+            "{name} must fail when missing"
+        );
+        assert!(!env.0.join("side-effect").exists());
+        env.stub(tool, "printf '<%s>\\n' \"$@\"");
+        assert_eq!(stdout(env.run(&p, None, None)), expected, "{name}");
+        fs::remove_file(env.0.join("bin").join(tool)).unwrap();
+    }
+    assert!(!env.0.join("side-effect").exists());
+}
+
+#[test]
+fn container_setup_installs_and_starts_without_upgrading_the_host() {
+    let env = Sandbox::new("engine-setup");
+    fs::write(env.0.join("os-release"), "ID=arch\n").unwrap();
+    env.stub("pacman", "printf '%s\\n' \"$@\" > \"$HOME/packages\"");
+    for tool in ["usermod", "groupadd"] {
+        env.stub(tool, "echo unexpected > \"$HOME/side-effect\"; exit 99");
+    }
+    for tool in ["systemctl", "rc-service", "rc-update"] {
+        env.stub(tool, "printf '%s\\n' \"$*\" >> \"$HOME/services\"");
+    }
+    for (choice, binary) in [("Docker", "docker"), ("Podman", "podman")] {
+        env.stub(binary, "[ \"$*\" = info ] || exit 99; echo operational");
+        let before = fs::read_to_string(env.0.join("services")).unwrap_or_default();
+        let mut p = profile("Install Docker / Podman");
+        // Only OS discovery is replaced; execute the shipped package/install logic.
+        let script = p.fields.get_mut("script").unwrap();
+        *script = script.replace(". /etc/os-release", ". \"$HOME/os-release\"");
+        p.command = "sh -c %{script} -- %{input:engine}".into();
+        stdout(env.run(&p, None, Some(("engine", choice))));
+        let packages = fs::read_to_string(env.0.join("packages")).unwrap();
+        assert!(packages.lines().any(|arg| arg == binary));
+        assert!(
+            !packages
+                .lines()
+                .any(|arg| arg.starts_with('-') && arg.contains('u'))
+        );
+        assert!(!env.0.join("side-effect").exists());
+        let services = fs::read_to_string(env.0.join("services")).unwrap();
+        if choice == "Docker" {
+            assert!(
+                services.contains("enable --now docker")
+                    || (services.contains("docker default") && services.contains("docker start"))
+            );
+        } else {
+            assert_eq!(services, before, "Podman is daemonless");
+        }
+    }
+}
+
+#[test]
+fn dotfiles_setup_installs_the_selected_shell_when_missing() {
+    let env = Sandbox::new("dotfiles-shell");
+    fs::create_dir_all(env.0.join("src/dotfiles")).unwrap();
+    fs::write(
+        env.0.join("src/dotfiles/install.sh"),
+        "echo installed > \"$HOME/result\"\n",
+    )
+    .unwrap();
+    fs::write(env.0.join("os-release"), "ID=arch\n").unwrap();
     env.stub("id", "echo 0");
-    env.stub("apt-get", "printf '%s\\n' \"$@\"");
-    p.command = "sh -c %{install} -- btop btop".into();
-    assert_eq!(stdout(env.run(&p, None, None)), "install\nbtop\n");
+    let mut p = profile("Install dotfiles");
+    let script = p.fields.get_mut("script").unwrap();
+    *script = script.replace(". /etc/os-release", ". \"$HOME/os-release\"");
+    p.command = "sh -c %{script} -- %{input:installer} %{input:shell}".into();
+    env.stub("pacman", "exit 42");
+    assert_eq!(
+        env.run(&p, None, Some(("shell", "bash"))).status.code(),
+        Some(42)
+    );
+    assert!(!env.0.join("result").exists());
+    env.stub(
+        "pacman",
+        r#"
+printf '%s\n' "$*" >> "$HOME/packages"
+printf '#!/bin/sh\nexec /bin/sh "$@"\n' > "$HOME/bin/bash"
+/bin/chmod +x "$HOME/bin/bash"
+"#,
+    );
+    stdout(env.run(&p, None, Some(("shell", "bash"))));
+    assert_eq!(
+        fs::read_to_string(env.0.join("result")).unwrap(),
+        "installed\n"
+    );
+    let installed = fs::read_to_string(env.0.join("packages")).unwrap();
+    assert!(installed.contains("bash"));
+    stdout(env.run(&p, None, Some(("shell", "bash"))));
+    assert_eq!(
+        fs::read_to_string(env.0.join("packages")).unwrap(),
+        installed
+    );
+}
+
+#[test]
+fn sudo_setup_installs_missing_tools_and_reuses_existing_installation() {
+    let env = Sandbox::new("sudo-dependency");
+    fs::write(env.0.join("os-release"), "ID=arch\n").unwrap();
+    let mut p = profile("Configure passwordless sudo");
+    let installer = p.fields.get_mut("install_sudo").unwrap();
+    *installer = installer.replace(". /etc/os-release", ". \"$HOME/os-release\"");
+    p.command = "sh -c %{install_sudo}".into();
+    env.stub("pacman", "exit 42");
+    assert_eq!(env.run(&p, None, None).status.code(), Some(42));
+    assert!(!env.0.join("bin/sudo").exists());
+    env.stub(
+        "pacman",
+        r#"
+printf '%s\n' "$*" >> "$HOME/packages"
+for tool in sudo visudo; do
+  printf '#!/bin/sh\nexit 0\n' > "$HOME/bin/$tool"
+  /bin/chmod +x "$HOME/bin/$tool"
+done
+"#,
+    );
+    stdout(env.run(&p, None, None));
+    assert!(env.0.join("bin/sudo").exists() && env.0.join("bin/visudo").exists());
+    let installed = fs::read_to_string(env.0.join("packages")).unwrap();
+    stdout(env.run(&p, None, None));
+    assert_eq!(
+        fs::read_to_string(env.0.join("packages")).unwrap(),
+        installed
+    );
+    fs::remove_file(env.0.join("bin/visudo")).unwrap();
+    stdout(env.run(&p, None, None));
+    assert!(env.0.join("bin/visudo").exists());
+}
+
+#[test]
+fn terminal_setup_installs_missing_tic_before_sending_definition() {
+    let env = Sandbox::new("terminfo-dependency");
+    for tool in ["cat", "mktemp", "mkdir", "rm"] {
+        env.link(tool);
+    }
+    fs::write(env.0.join("os-release"), "ID=arch\n").unwrap();
+    env.stub("id", "echo 0");
+    env.stub(
+        "ssh",
+        "[ \"$1\" = -p ] && shift 2; [ \"$1\" = -tt ] && shift; shift 2; exec /bin/sh -c \"$1\"",
+    );
+    env.stub("infocmp", "echo 'test-terminal|test terminal, cols#80,'");
+    let mut p = profile("Copy terminal definition");
+    let installer = p.fields.get_mut("ensure_tic").unwrap();
+    *installer = installer.replace(". /etc/os-release", ". \"$HOME/os-release\"");
+    env.stub("pacman", "exit 42");
+    assert_eq!(env.run(&p, None, None).status.code(), Some(42));
+    assert!(!env.0.join(".terminfo").exists());
+    env.stub(
+        "pacman",
+        r#"
+printf '%s\n' "$*" >> "$HOME/packages"
+printf '#!/bin/sh\ncat "$4"\n' > "$HOME/bin/tic"
+/bin/chmod +x "$HOME/bin/tic"
+"#,
+    );
+    assert_eq!(
+        stdout(env.run(&p, Some("2222"), None)),
+        "test-terminal|test terminal, cols#80,\n"
+    );
+    let installed = fs::read_to_string(env.0.join("packages")).unwrap();
+    assert!(installed.contains("ncurses"));
+    stdout(env.run(&p, None, None));
+    assert_eq!(
+        fs::read_to_string(env.0.join("packages")).unwrap(),
+        installed
+    );
 }
 
 #[test]
@@ -408,7 +551,7 @@ fn terminal_definition_is_exported_before_ssh_and_temp_files_are_removed() {
     // Emulate ssh's remote shell, forwarding stdin without executing any real ssh.
     env.stub(
         "ssh",
-        "[ \"$1\" = -p ] && shift 2; shift 2; exec /bin/sh -c \"$1\"",
+        "[ \"$1\" = -p ] && shift 2; [ \"$1\" = -tt ] && shift; shift 2; exec /bin/sh -c \"$1\"",
     );
     env.stub("infocmp", "echo 'test-terminal|test terminal, cols#80,'");
     env.stub("tic", "[ \"$1\" = -x ] && [ \"$2\" = -o ] && [ \"$3\" = \"$HOME/.terminfo\" ] || exit 9; cat \"$4\"");
@@ -434,35 +577,136 @@ fn terminal_definition_is_exported_before_ssh_and_temp_files_are_removed() {
 }
 
 #[test]
-fn dependency_installation_requires_consent_and_verifies_the_result() {
-    let env = Sandbox::new("dependency");
-    let mut p = profile("SSH");
-    p.command = "sh -c %{ensure} -- wanted wanted 'this machine' %{install}".into();
-    env.stub(
-        "brew",
-        "printf '#!/bin/sh\\nexit 0\\n' > \"$HOME/bin/wanted\"; /bin/chmod +x \"$HOME/bin/wanted\"",
-    );
-    for reply in [b"n\n".as_slice(), b"\n", b""] {
-        let result = env.run_input(&p, None, None, reply);
-        assert!(!result.status.success());
-        assert!(String::from_utf8_lossy(&result.stderr).contains("Install wanted? [y/N]"));
-        assert!(!env.0.join("bin/wanted").exists());
+fn bundled_recipe_payloads_parse_in_their_documented_shell() {
+    let config = Config::parse(&crate::config_defaults::defaults(false, false).unwrap()).unwrap();
+    for recipe in config.configuration_scripts {
+        for (field, source) in &recipe.fields {
+            if !matches!(
+                field.as_str(),
+                "script"
+                    | "bootstrap"
+                    | "maintenance"
+                    | "firewall"
+                    | "install_sudo"
+                    | "prepare"
+                    | "prepare_key"
+                    | "setup_script"
+                    | "set_expiry"
+                    | "ensure_tic"
+                    | "elevate"
+                    | "export_script"
+            ) {
+                continue;
+            }
+            let shell = if field == "maintenance" { "bash" } else { "sh" };
+            let mut child = Command::new(shell)
+                .arg("-n")
+                .stdin(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(source.as_bytes())
+                .unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}/{field}: {}",
+                recipe.name,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
-    assert!(env.run_input(&p, None, None, b"yes\n").status.success());
-    assert!(
-        env.run(&p, None, None).stderr.is_empty(),
-        "installed tools must not prompt"
-    );
-    fs::remove_file(env.0.join("bin/wanted")).unwrap();
-    env.stub("brew", "exit 42");
-    assert_eq!(
-        env.run_input(&p, None, None, b"y\n").status.code(),
-        Some(42)
-    );
-    env.stub("brew", "exit 0");
-    let result = env.run_input(&p, None, None, b"y\n");
-    assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("still unavailable"));
+}
+
+#[test]
+fn shell_firewall_validation_rejects_bad_inputs_before_changing_rules() {
+    let env = Sandbox::new("firewall-validation");
+    for tool in ["tr", "awk", "grep"] {
+        env.link(tool);
+    }
+    // The real iproute2 parser is exercised in the Linux service integration.
+    env.stub("ip", "exit 1");
+    for tool in ["ufw", "firewall-cmd", "systemctl"] {
+        env.stub(tool, "echo unexpected > \"$HOME/changed\"; exit 99");
+    }
+    let mut p = profile("Configure firewall");
+    p.command = "sh -c %{firewall} -- ufw %{input:ssh_ips} %{input:ports} 2222".into();
+    // Bypass the client format checks to exercise the remote checks as well.
+    for input in &mut p.inputs {
+        input.pattern = None;
+    }
+    for (id, value, message) in [
+        ("ssh_ips", "not-an-ip", "Invalid SSH source"),
+        ("ssh_ips", "999.2.3.4", "Invalid SSH source"),
+        ("ssh_ips", "192.0.2.1/33", "Invalid SSH source"),
+        ("ssh_ips", "2001:::1", "Invalid SSH source"),
+        ("ports", "70000/tcp", "Port range"),
+        ("ports", "9000-8000/tcp", "Port range"),
+        ("ports", "2200-2300/tcp", "Configure SSH access"),
+        ("ports", "80/tcp;echo", "Ports require"),
+    ] {
+        let out = env.run(&p, None, Some((id, value)));
+        assert!(!out.status.success(), "{value}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(message),
+            "{value}: {:?}",
+            out.stderr
+        );
+        assert!(!env.0.join("changed").exists());
+    }
+}
+
+#[test]
+fn shell_log_validation_rejects_invalid_limits_before_maintenance() {
+    let env = Sandbox::new("log-validation");
+    env.link("bash");
+    env.stub("jq", "echo unexpected > \"$HOME/changed\"; exit 99");
+    let mut p = profile("Configure log limits and cleanup");
+    p.command = "bash -c %{maintenance} -- unused-bootstrap unused-source %{input:disk} %{input:runtime} %{input:days} %{input:file_size} %{input:backups} %{input:cleanup} %{input:caches} %{input:guests} %{input:depth}".into();
+    for input in &mut p.inputs {
+        input.pattern = None;
+    }
+    for (id, value, message) in [
+        ("disk", "0", "positive bytes"),
+        ("disk", "100000000000000000000T", "too large"),
+        ("file_size", "10MB", "positive bytes"),
+        ("days", "36501", "Days must"),
+        ("backups", "101", "Backups must"),
+        ("depth", "6", "Guest depth"),
+    ] {
+        let out = env.run(&p, None, Some((id, value)));
+        assert!(!out.status.success(), "{value}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(message),
+            "{value}: {:?}",
+            out.stderr
+        );
+        assert!(!env.0.join("changed").exists());
+    }
+}
+
+#[test]
+fn shipped_profiles_have_no_preparation_side_effects() {
+    for windows in [false, true] {
+        let config =
+            Config::parse(&crate::config_defaults::defaults(windows, false).unwrap()).unwrap();
+        for p in config.profiles {
+            assert!(
+                p.prepare(&Target {
+                    host: "unused.invalid".into(),
+                    port: None
+                })
+                .unwrap()
+                .is_none(),
+                "{}",
+                p.name
+            );
+        }
+    }
 }
 
 #[test]

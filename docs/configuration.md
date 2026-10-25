@@ -19,17 +19,13 @@ Profiles appear only when their local clients are available. Alongside SSH, Mosh
 | Dropbear | Runs `dbclient` with an optional `-p` port. Requires local Dropbear client. |
 | PuTTY | Opens `putty.exe -ssh` on Windows, with an optional `-P` port. Requires PuTTY on PATH. |
 | Plink | Runs `plink.exe -ssh -t` in the current Windows terminal. Requires Plink on PATH. |
-| Tmux | Attaches to the remote `main` session or creates it. Requires remote tmux; edit `remote` to use another session name. Detach with tmux's Ctrl+B, then D. |
+| Tmux | Attaches to a remote session or creates one, without forcing a session name. Requires remote tmux. Detach with tmux's Ctrl+B, then D. |
 | SFTP | Interactive OpenSSH file transfers; type `help` for commands and `bye` to exit. Requires local sftp and a remote SFTP subsystem. |
-| Monitor | Opens a compact btop health dashboard: CPU/load/temperature, memory/swap, mounted filesystem space, disk busy time, network traffic and supported GPU statistics. Requires remote btop. |
+| Monitor | Runs remote btop with its normal user configuration. Requires remote btop. |
 | Tunnel | Opens a dialog for `local port:destination host:port`, default `8080:localhost:80`. The destination is resolved/reached from the SSH server. |
 | SOCKS | Opens a dialog for the local proxy port, default `1080`. Configure your client to use SOCKS5 at `127.0.0.1:1080`, with proxy-side DNS when desired. |
 
-![Compact remote health dashboard](images/monitor.png)
-
-Monitor starts with CPU, memory/disks and network panels; the process list is hidden to leave room for health data. Press **4** in btop to toggle processes, **i** to switch disk space/busy meters to read/write graphs, and **n/b** to cycle network interfaces. GPU utilization appears in the CPU panel when btop can detect it; GPU panels can be toggled with **5–0** on supported builds. Temperatures and other sensor data also depend on remote hardware, drivers and permissions. GPU monitoring requires a GPU-enabled btop build and the appropriate driver libraries; installing btop alone cannot guarantee it.
-
-The profile's `dashboard` field holds editable btop settings. Mounted filesystems are read live, including container roots and network mounts. The `disks_filter` excludes common virtual system mounts such as `/proc` and `/dev`; edit it to select or hide particular mounts. The number of visible mounts depends on terminal size. A private temporary config keeps your regular btop layout unchanged and is removed when the monitor exits. When btop is missing, Monitor offers to install it on the remote before opening the dashboard.
+Profiles launch the named client or remote application without installing software, downloading executables, or replacing configuration files. Monitor uses your btop configuration; Zellij uses your configuration without forcing a session name, with startup tips and release notes disabled through command-line options.
 
 Both forwarding profiles bind only to `127.0.0.1`, remain in the foreground, and stop with Ctrl+C. They request no remote shell, fail if the listening socket cannot be created, and use SSH keepalives to detect a lost connection. A successful listener does not guarantee the destination service is reachable; the SSH server must allow forwarding. Use Alt+Enter in the dialog to return to the menu when the tunnel stops. Explicit SSH ports and alias settings work as in the other profiles.
 
@@ -47,19 +43,15 @@ Ctrl+H, Ctrl+I, Ctrl+J, Ctrl+M, Ctrl+S, and Ctrl+Z remain reserved for profile s
 
 The Keys help topic lists active profile shortcuts. Setup recipes do not accept `key`.
 
-## Missing tools and installation
+## Missing tools
 
-Default profiles check local clients before appearing in the menu. Remote tools are checked when connecting. Where installation is supported, a missing tool prompts **Install …? [y/N]**. Enter or any answer other than yes declines. Successful installation is followed by another executable check before continuing; already installed tools do not prompt.
+Default profiles check local clients before appearing in the menu. Install local and remote prerequisites separately. A missing remote executable produces the remote shell's normal error; there is no installation prompt or package-manager invocation.
 
-SSH and forwarding profiles check local SSH; MC checks local MC and SSH; SFTP checks local SFTP. Bash, Tmux and Monitor check their remote tools inside the SSH session. Mosh checks the local client and runs a preliminary SSH session to check/install remote `mosh-server`, so it may authenticate twice. Zellij asks before its verified installation into remote `~/.local/bin`.
-
-Package installs use Homebrew, apt-get, dnf, yum, pacman, zypper or apk, retaining their normal confirmation and sudo prompts. System package managers require root or sudo. No package-manager auto-yes flag is used. Unsupported systems receive manual-install guidance. Packages must exist in the configured repositories; the helper does not refresh indexes, change repositories or configure Mosh's UDP access.
+SSH and forwarding profiles require local SSH; MC requires local MC and SSH; SFTP requires local SFTP. Bash, Tmux, Zellij and Monitor need their named application on the remote PATH. Mosh requires local `mosh`/`ssh` and remote `mosh-server`; Shui does not open an additional preparation connection or configure UDP access.
 
 `prepare_command` is an optional local shell command run with the terminal restored before host setup, connection launch, or history writes. It supports target placeholders and named fields, but not dialog inputs. Exit 0 continues; cancellation, failure or failure to start returns to the menu without launching or recording a connection. It runs only for launch profiles, including shortcuts and one-off connections; it does not run when opening the menu or configuring a host.
 
-Remote checks inside `command` follow the connection's normal lifecycle: declining stops the remote command; use Alt+Enter to return to the menu afterward. The remote launch may already be recorded in history. The shipped `ensure` and `install` helpers are ordinary named fields shared through YAML anchors, not application-specific config types. The source defaults use YAML anchors; build-time merging expands them in the generated config. When copying a profile from the source defaults, include its referenced helper anchors as well. Customization examples live in [optional examples](config.optional.yml).
-
-![A launch profile offering its missing local dependency](images/install-prompt.png)
+No shipped profile uses `prepare_command`; it remains available for explicit custom workflows. Customization examples live in [optional examples](config.optional.yml).
 
 ## Profile availability
 
@@ -71,7 +63,7 @@ Checks are literal local `sh -c` commands with stdin closed and output discarded
 
 If the configured default is unavailable, the first available profile becomes the session default. History restoration and F8 only select available profiles. If none remain, Shui reports an error before opening the TUI. Filtering does not rewrite your config; restart after installing a missing tool.
 
-Every shipped launch profile has an `available_command` for its local clients: SSH-based profiles require `ssh`, Mosh requires `ssh` and `mosh`, MC requires `ssh` and `mc`, SFTP requires `sftp`, Dropbear requires `dbclient`, and PuTTY/Plink require Windows (`OS=Windows_NT`) and their respective executables. Remote tools are checked after connecting. Remove a local availability check if you want the existing preparation helper to offer installation instead. Existing config files are preserved; copy the new checks and profiles from the [shared defaults](config.example.yml) and [Windows overrides](config.windows.yml).
+Every shipped launch profile has an `available_command` for its local clients: SSH-based profiles require `ssh`, Mosh requires `ssh` and `mosh`, MC requires `ssh` and `mc`, SFTP requires `sftp`, Dropbear requires `dbclient`, and PuTTY/Plink require their respective Windows executables. Existing config files are preserved; copy the simplified profiles from the [shared defaults](config.example.yml) and [Windows overrides](config.windows.yml).
 
 ## Command execution
 

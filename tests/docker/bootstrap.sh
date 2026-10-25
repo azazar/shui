@@ -1,5 +1,5 @@
 #!/bin/sh
-# Test prerequisites only. tmux, btop and Zellij must be installed by the profiles.
+# Test prerequisites only. Profiles never install their own dependencies.
 set -eu
 # Optional trusted proxy CAs. Never disable TLS or repository signature checks.
 have_proxy_ca=0
@@ -29,26 +29,26 @@ case "$1" in
       printf 'Acquire::https::CaInfo "/etc/ssl/certs/ca-certificates.crt";\n' > /etc/apt/apt.conf.d/99shui-test-ca
     fi
     apt-get update
-    apt-get install -y --no-install-recommends python3 openssh-client openssh-server sudo ca-certificates curl tar gzip diffutils ncurses-bin ncurses-term procps passwd
+    apt-get install -y --no-install-recommends python3 openssh-client openssh-server sudo ca-certificates curl tar gzip diffutils ncurses-bin ncurses-term procps passwd bash tmux btop
     rm -f /etc/apt/apt.conf.d/99shui-test-ca
     ;;
   fedora)
-    dnf install -y --allowerasing python3 openssh-clients openssh-server sudo ca-certificates curl tar gzip diffutils ncurses procps-ng shadow-utils passwd
+    dnf install -y --allowerasing python3 openssh-clients openssh-server sudo ca-certificates curl tar gzip diffutils ncurses procps-ng shadow-utils passwd bash tmux btop
     ;;
   rocky)
     # btop is supplied by EPEL on Enterprise Linux, not the base repositories.
     dnf install -y epel-release
-    dnf install -y --allowerasing python3 openssh-clients openssh-server sudo ca-certificates curl tar gzip diffutils ncurses procps-ng shadow-utils passwd
+    dnf install -y --allowerasing python3 openssh-clients openssh-server sudo ca-certificates curl tar gzip diffutils ncurses procps-ng shadow-utils passwd bash tmux btop
     ;;
   alpine)
-    apk add --no-cache python3 openssh sudo ca-certificates curl tar gzip diffutils ncurses ncurses-terminfo-base procps shadow
+    apk add --no-cache python3 openssh sudo ca-certificates curl tar gzip diffutils ncurses ncurses-terminfo-base procps shadow bash tmux btop
     ;;
   arch)
-    pacman -Syu --noconfirm --needed python openssh sudo ca-certificates curl tar gzip diffutils ncurses procps-ng shadow
+    pacman -Syu --noconfirm --needed python openssh sudo ca-certificates curl tar gzip diffutils ncurses procps-ng shadow bash tmux btop
     ;;
   opensuse)
     zypper --non-interactive refresh
-    zypper --non-interactive install python3 openssh sudo ca-certificates curl tar gzip diffutils gawk ncurses-utils ncurses-devel ncurses procps shadow
+    zypper --non-interactive install python3 openssh sudo ca-certificates curl tar gzip diffutils gawk ncurses-utils ncurses-devel ncurses procps shadow bash tmux btop
     # Tumbleweed's tmux uses /run/tmux, normally created by systemd-tmpfiles.
     # The test container has no init system, so supply the shared parent only.
     mkdir -p /run/tmux
@@ -72,3 +72,17 @@ for file in /etc/sudoers /usr/etc/sudoers; do
   [ ! -f "$file" ] || chmod 440 "$file"
 done
 visudo -c
+# The harness, not the launch profile, provisions the pinned Zellij fixture.
+case "$(uname -m)" in
+  x86_64) platform=x86_64-unknown-linux-musl; expected=d006c521dcb475a6005d741e9dd7c5758e5a23b28dd60a5c10cebfa4876319dd ;;
+  aarch64|arm64) platform=aarch64-unknown-linux-musl; expected=2a2c0621e6f3b11ecbb05d66939a48000a2508604620aa20727a5fd61c49f451 ;;
+  *) echo 'Unsupported Zellij test architecture' >&2; exit 1 ;;
+esac
+work=$(mktemp -d)
+trap 'rm -rf "$work"' 0
+curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location \
+  --retry 2 --connect-timeout 15 --max-time 180 --silent --show-error \
+  -o "$work/zellij.tar.gz" "https://github.com/zellij-org/zellij/releases/download/v0.45.1/zellij-$platform.tar.gz"
+tar -xzf "$work/zellij.tar.gz" -C "$work" zellij
+printf '%s  %s\n' "$expected" "$work/zellij" | sha256sum -c -
+install -m 755 "$work/zellij" /usr/local/bin/zellij

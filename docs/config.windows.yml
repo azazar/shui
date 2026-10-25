@@ -1,8 +1,6 @@
 # Native Windows overrides. No local POSIX shell or Git installation required.
 profiles:
   - name: SSH
-    ensure: null
-    install: null
     shell: direct
     available_command: where.exe ssh
     prepare_command: null
@@ -11,6 +9,83 @@ profiles:
   - name: Mosh
     shell: direct
     available_command: powershell.exe -NoProfile -Command 'Get-Command ssh,mosh -CommandType Application -ErrorAction Stop | Out-Null'
+    command: mosh -- %h
+    port_args: ["--ssh=ssh -p %p"]
+  - name: MC
+    shell: direct
+    available_command: where.exe mc
+    prepare_command: null
+    command: mc /sh://%t/
+    port_args: []
+  - name: Bash
+    shell: direct
+    available_command: where.exe ssh
+    prepare_command: null
+    command: ssh -tt -- %h %{remote}
+    port_args: ["-p", "%p"]
+  - name: Zellij
+    shell: direct
+    available_command: where.exe ssh
+    prepare_command: null
+    command: ssh -tt -- %h %{remote}
+    port_args: ["-p", "%p"]
+  - name: Tmux
+    shell: direct
+    available_command: where.exe ssh
+    prepare_command: null
+    command: ssh -tt -- %h %{remote}
+    port_args: ["-p", "%p"]
+  - name: SFTP
+    shell: direct
+    available_command: where.exe sftp
+    prepare_command: null
+    command: sftp -- %h
+    port_args: ["-P", "%p"]
+  - name: Monitor
+    shell: direct
+    available_command: where.exe ssh
+    prepare_command: null
+    command: ssh -tt -- %h %{remote}
+    port_args: ["-p", "%p"]
+  - name: Tunnel
+    shell: direct
+    available_command: where.exe ssh
+    prepare_command: null
+    command: ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -L 127.0.0.1:%{input:forward} -- %h
+    port_args: ["-p", "%p"]
+  - name: SOCKS
+    shell: direct
+    available_command: where.exe ssh
+    prepare_command: null
+    command: ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -D 127.0.0.1:%{input:port} -- %h
+    port_args: ["-p", "%p"]
+  - name: Dropbear
+    shell: direct
+    available_command: where.exe dbclient
+    prepare_command: null
+    command: dbclient -- %h
+    port_args: ["-p", "%p"]
+  - name: PuTTY
+    shell: direct
+    available_command: where.exe putty.exe
+    prepare_command: null
+    key: Alt+P
+    command: putty.exe -ssh %h
+    port_args: ["-P", "%p"]
+  - name: Plink
+    shell: direct
+    available_command: where.exe plink.exe
+    prepare_command: null
+    key: Alt+L
+    command: plink.exe -ssh -t %h
+    port_args: ["-P", "%p"]
+
+configuration_scripts:
+  - name: Configure key-based auth
+    prepare_key: null
+    setup_script: null
+    shell: powershell
+    available_command: Get-Command ssh,ssh-keygen -CommandType Application -ErrorAction Stop | Out-Null
     windows: &windows_helpers |
       $ErrorActionPreference = 'Stop'
       function Invoke-Native {
@@ -18,15 +93,14 @@ profiles:
         $start = [System.Diagnostics.ProcessStartInfo]::new()
         $start.FileName = $Program
         $start.UseShellExecute = $false
-        # Windows argv quoting: preserve empty arguments, quotes and trailing backslashes.
+        # Quote Windows argv, including quotes and trailing backslashes.
         $start.Arguments = ($Arguments | ForEach-Object {
           '"' + [regex]::Replace([regex]::Replace($_, '(\\*)"', '$1$1\"'), '(\\+)$', '$1$1') + '"'
         }) -join ' '
         $start.RedirectStandardInput = $null -ne $InputText
         $start.RedirectStandardOutput = $Capture
         if ($Capture) { $start.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false) }
-        # .NET Framework creates its stdin writer from Console.InputEncoding.
-        # Set UTF-8 without a BOM before Start, or it prepends a BOM to SSH input.
+        # Avoid a UTF-8 BOM on SSH stdin from .NET Framework's writer.
         $previousEncoding = [Console]::InputEncoding
         try {
           if ($start.RedirectStandardInput) { [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false) }
@@ -62,96 +136,6 @@ profiles:
         }
         return $public
       }
-    prepare_shell: powershell
-    prepare_command: . ([scriptblock]::Create(%{windows})) ; $port = %p; $connection = @(); if ($port) { $connection = @('-p', $port) }; Invoke-Native ssh ($connection + @('-tt', '--', %h, %{check_remote}))
-    command: mosh -- %h
-    port_args: ["--ssh=ssh -p %p"]
-  - name: MC
-    ensure: null
-    install: null
-    shell: direct
-    available_command: where.exe mc
-    prepare_command: null
-    command: mc /sh://%t/
-    port_args: []
-  - name: Bash
-    shell: direct
-    available_command: where.exe ssh
-    prepare_command: null
-    command: ssh -tt -- %h %{launch_remote}
-    port_args: ["-p", "%p"]
-  - name: Zellij
-    ensure: null
-    install: null
-    shell: direct
-    available_command: where.exe ssh
-    prepare_command: null
-    command: ssh -tt -- %h %{remote}
-    port_args: ["-p", "%p"]
-  - name: Tmux
-    shell: direct
-    available_command: where.exe ssh
-    prepare_command: null
-    command: ssh -tt -- %h %{launch_remote}
-    port_args: ["-p", "%p"]
-  - name: SFTP
-    ensure: null
-    install: null
-    shell: direct
-    available_command: where.exe sftp
-    prepare_command: null
-    command: sftp -- %h
-    port_args: ["-P", "%p"]
-  - name: Monitor
-    shell: direct
-    available_command: where.exe ssh
-    prepare_command: null
-    command: ssh -tt -- %h %{remote}
-    port_args: ["-p", "%p"]
-  - name: Tunnel
-    ensure: null
-    install: null
-    shell: direct
-    available_command: where.exe ssh
-    prepare_command: null
-    command: ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -L 127.0.0.1:%{input:forward} -- %h
-    port_args: ["-p", "%p"]
-  - name: SOCKS
-    ensure: null
-    install: null
-    shell: direct
-    available_command: where.exe ssh
-    prepare_command: null
-    command: ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -D 127.0.0.1:%{input:port} -- %h
-    port_args: ["-p", "%p"]
-  - name: Dropbear
-    shell: direct
-    available_command: where.exe dbclient
-    prepare_command: null
-    command: dbclient -- %h
-    port_args: ["-p", "%p"]
-  - name: PuTTY
-    shell: direct
-    available_command: where.exe putty.exe
-    prepare_command: null
-    key: Alt+P
-    command: putty.exe -ssh %h
-    port_args: ["-P", "%p"]
-  - name: Plink
-    shell: direct
-    available_command: where.exe plink.exe
-    prepare_command: null
-    key: Alt+L
-    command: plink.exe -ssh -t %h
-    port_args: ["-P", "%p"]
-
-configuration_scripts:
-  - name: Configure key-based auth
-    prepare_key: null
-    setup_script: null
-    shell: powershell
-    available_command: Get-Command ssh,ssh-keygen -CommandType Application -ErrorAction Stop | Out-Null
-    windows: *windows_helpers
     inputs:
       - &windows_key
         id: key
@@ -197,12 +181,8 @@ configuration_scripts:
         printf '\n%s\n' "$key" >> "$file"
       fi
     setup_windows: &setup_windows |
-      param($Destination, $Port, $KeyName, $ExpiryRemote, $InstallKeyRemote, $Source = '', $Installer = '', $Remote = '')
+      param($Destination, $Port, $KeyName, $ExpiryRemote, $InstallKeyRemote)
       $ErrorActionPreference = 'Stop'
-      if ($Source) {
-        if (![IO.Path]::IsPathRooted($Source)) { $Source = Join-Path $env:USERPROFILE $Source }
-        if (!(Test-Path -LiteralPath (Join-Path $Source $Installer) -PathType Leaf)) { throw "Missing installer: $Source/$Installer" }
-      }
       $public = Get-KeyPath $KeyName
       $private = $public.Substring(0, $public.Length - 4)
       $key = [IO.File]::ReadAllText($public).Trim() + "`n"
@@ -210,13 +190,6 @@ configuration_scripts:
       if ($Port) { $connection = @('-p', $Port) }
       Invoke-Native ssh ($connection + @('--', $Destination, $InstallKeyRemote)) -InputText $key
       Invoke-Native ssh ($connection + @('-i', $private, '--', $Destination, $ExpiryRemote)) -InputText $key
-      if ($Source) {
-        Invoke-Native ssh ($connection + @('-i', $private, '--', $Destination, 'mkdir -p "$HOME/src/dotfiles"'))
-        $copy = @()
-        if ($Port) { $copy = @('-P', $Port) }
-        Invoke-Native scp ($copy + @('-i', $private, '-r', (Join-Path $Source '.'), ($Destination + ':src/dotfiles/')))
-        Invoke-Native ssh ($connection + @('-i', $private, '-tt', '--', $Destination, $Remote))
-      }
   - name: Install dotfiles
     shell: powershell
     available_command: Get-Command ssh,scp -CommandType Application -ErrorAction Stop | Out-Null
@@ -279,4 +252,4 @@ configuration_scripts:
     shell: powershell
     available_command: if ((Get-Command ssh,infocmp -CommandType Application -ErrorAction SilentlyContinue).Count -eq 2 -and $env:TERM) { exit 0 } else { exit 1 }
     windows: *windows_helpers
-    command: . ([scriptblock]::Create(%{windows})); $definition = Invoke-Native infocmp @('-x', '--', $env:TERM) -Capture; $port = %p; $connection = @(); if ($port) { $connection = @('-p', $port) }; Invoke-Native ssh ($connection + @('--', %h, %{remote})) -InputText $definition
+    command: . ([scriptblock]::Create(%{windows})); $definition = Invoke-Native infocmp @('-x', '--', $env:TERM) -Capture; $port = %p; $connection = @(); if ($port) { $connection = @('-p', $port) }; Invoke-Native ssh ($connection + @('-tt', '--', %h, %{ensure_remote})); Invoke-Native ssh ($connection + @('--', %h, %{remote})) -InputText $definition

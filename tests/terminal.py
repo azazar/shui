@@ -1,4 +1,5 @@
 """Exercise the real TUI and command handoff without making network connections."""
+
 import errno
 import faulthandler
 import fcntl
@@ -39,7 +40,9 @@ def wait_pty(process, master, timeout, consume):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise subprocess.TimeoutExpired(process.args, timeout)
-        if select.select([master], [], [], 0 if status is not None else min(remaining, 0.05))[0]:
+        if select.select(
+            [master], [], [], 0 if status is not None else min(remaining, 0.05)
+        )[0]:
             chunk = read_pty(master)
             if chunk:
                 consume(chunk)
@@ -64,12 +67,15 @@ def check_pty_drain():
         master, slave = pty.openpty()
         process = subprocess.Popen(
             [sys.executable, "-c", "import os; os.write(1, b'x' * 262144)"],
-            stdin=slave, stdout=slave, stderr=slave)
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+        )
         try:
             if finish:
                 output = bytearray()
                 assert wait_pty(process, master, 5, output.extend) == 0
-                assert output == b'x' * 262144
+                assert output == b"x" * 262144
             else:
                 assert select.select([master], [], [], 5)[0], "writer did not start"
                 assert process.poll() is None, "writer did not fill the PTY buffer"
@@ -85,10 +91,13 @@ def interaction_checks(binary):
         root = Path(directory)
         (root / ".ssh").mkdir()
         hosts = [f"host-{index:02}-long-production-name" for index in range(45)]
-        (root / ".ssh/config").write_text("".join(
-            f"Host {host}\n User tester\n HostName 192.0.2.{index + 1}\n"
-            " IdentityFile ~/.ssh/a-long-private-key-name\n ProxyJump jump.example.org\n"
-            for index, host in enumerate(hosts)))
+        (root / ".ssh/config").write_text(
+            "".join(
+                f"Host {host}\n User tester\n HostName 192.0.2.{index + 1}\n"
+                " IdentityFile ~/.ssh/a-long-private-key-name\n ProxyJump jump.example.org\n"
+                for index, host in enumerate(hosts)
+            )
+        )
         config = root / "settings/shui.yml"
         config.parent.mkdir(parents=True)
         # The harmless commands are deliberate: a regression must never use real SSH.
@@ -105,12 +114,25 @@ def interaction_checks(binary):
       - {id: third, type: promptString, default: third-value}
       - {id: fourth, type: promptString, default: fourth-value}
 """
-        recipes = profiles.replace("key: Alt+Z, ", "").replace("    key: Ctrl+Alt+O\n", "")
-        config.write_text("default: Zero\nprofiles:\n" + profiles +
-                          "configuration_scripts:\n" + recipes)
-        env = dict(os.environ, HOME=str(root), USER="tester", TERM="xterm-256color",
-                   XDG_CONFIG_HOME=str(root / "settings"))
-        hosts = subprocess.check_output([str(binary), "--dump"], env=env, text=True).splitlines()
+        recipes = profiles.replace("key: Alt+Z, ", "").replace(
+            "    key: Ctrl+Alt+O\n", ""
+        )
+        config.write_text(
+            "default: Zero\nprofiles:\n"
+            + profiles
+            + "configuration_scripts:\n"
+            + recipes
+        )
+        env = dict(
+            os.environ,
+            HOME=str(root),
+            USER="tester",
+            TERM="xterm-256color",
+            XDG_CONFIG_HOME=str(root / "settings"),
+        )
+        hosts = subprocess.check_output(
+            [str(binary), "--dump"], env=env, text=True
+        ).splitlines()
 
         class ScreenSession:
             def __init__(self, rows, cols):
@@ -118,17 +140,28 @@ def interaction_checks(binary):
                 self.rows, self.cols = rows, cols
                 self.screen = pyte.Screen(cols, rows)
                 self.stream = pyte.ByteStream(self.screen)
-                fcntl.ioctl(self.slave, termios.TIOCSWINSZ,
-                            struct.pack("HHHH", rows, cols, 0, 0))
+                fcntl.ioctl(
+                    self.slave,
+                    termios.TIOCSWINSZ,
+                    struct.pack("HHHH", rows, cols, 0, 0),
+                )
                 self.before = termios.tcgetattr(self.slave)
-                self.process = subprocess.Popen([str(binary)], stdin=self.slave,
-                                                stdout=self.slave, stderr=self.slave,
-                                                env=env, cwd=root)
+                self.process = subprocess.Popen(
+                    [str(binary)],
+                    stdin=self.slave,
+                    stdout=self.slave,
+                    stderr=self.slave,
+                    env=env,
+                    cwd=root,
+                )
 
             def __enter__(self):
                 try:
                     deadline = time.monotonic() + 5
-                    while "SHUI" not in self.screen.display[0] and time.monotonic() < deadline:
+                    while (
+                        "SHUI" not in self.screen.display[0]
+                        and time.monotonic() < deadline
+                    ):
                         self.drain()
                         if self.process.poll() is not None:
                             break
@@ -170,8 +203,11 @@ def interaction_checks(binary):
             def resize(self, rows, cols):
                 self.rows, self.cols = rows, cols
                 self.screen.resize(lines=rows, columns=cols)
-                fcntl.ioctl(self.slave, termios.TIOCSWINSZ,
-                            struct.pack("HHHH", rows, cols, 0, 0))
+                fcntl.ioctl(
+                    self.slave,
+                    termios.TIOCSWINSZ,
+                    struct.pack("HHHH", rows, cols, 0, 0),
+                )
                 self.process.send_signal(signal.SIGWINCH)
                 self.drain()
 
@@ -179,13 +215,22 @@ def interaction_checks(binary):
                 assert condition, message + "\n" + "\n".join(self.screen.display)
 
             def locate(self, text):
-                found = [(row, line.index(text)) for row, line in enumerate(self.screen.display)
-                         if text in line]
-                self.require(len(found) == 1, f"expected one visible {text!r}, got {found}")
+                found = [
+                    (row, line.index(text))
+                    for row, line in enumerate(self.screen.display)
+                    if text in line
+                ]
+                self.require(
+                    len(found) == 1, f"expected one visible {text!r}, got {found}"
+                )
                 return found[0]
 
             def selected(self):
-                found = [(row, line) for row, line in enumerate(self.screen.display) if "› " in line]
+                found = [
+                    (row, line)
+                    for row, line in enumerate(self.screen.display)
+                    if "› " in line
+                ]
                 self.require(len(found) == 1, f"expected one selected row, got {found}")
                 return found[0]
 
@@ -201,72 +246,106 @@ def interaction_checks(binary):
 
             def normal_bar(self):
                 footer = self.footer()
-                self.require("Help" in footer and "Quit" in footer, "normal menu bar missing")
-                self.require(not any(text in footer for text in ("Shift", "Ctrl", "Alt", "New")),
-                             "normal bar exposed modified shortcuts")
+                self.require(
+                    "Help" in footer and "Quit" in footer, "normal menu bar missing"
+                )
+                self.require(
+                    not any(text in footer for text in ("Shift", "Ctrl", "Alt", "New")),
+                    "normal bar exposed modified shortcuts",
+                )
 
         for rows, cols in [(24, 100), (16, 65), (9, 40), (6, 26)]:
             with ScreenSession(rows, cols) as tui:
                 tui.normal_bar()
                 tui.send(b"\x1bOS")
-                tui.require("[ ]" in tui.selected()[1] and "Zero" in tui.selected()[1], "F4 did not focus the first checkbox")
-                anchors = {label: tui.locate(label)
-                           for label in ("REMOTE SETUP",)}
+                tui.require(
+                    "[ ]" in tui.selected()[1] and "Zero" in tui.selected()[1],
+                    "F4 did not focus the first checkbox",
+                )
+                anchors = {label: tui.locate(label) for label in ("REMOTE SETUP",)}
                 tui.send(b"\r")  # Validation errors use the reserved status area.
                 for label, position in anchors.items():
-                    tui.require(tui.locate(label) == position, f"validation moved {label}")
+                    tui.require(
+                        tui.locate(label) == position, f"validation moved {label}"
+                    )
                 tui.focus("One")
                 tui.send(b" ")
                 tui.focus("Many")
                 tui.send(b" ")
                 if rows == 24:
                     visible = "\n".join(tui.screen.display)
-                    tui.require(visible.count("first-value") == 2 and "fourth-value" in visible,
-                                "selected recipes' options are not visible together")
+                    tui.require(
+                        visible.count("first-value") == 2 and "fourth-value" in visible,
+                        "selected recipes' options are not visible together",
+                    )
                     tui.send(b" ")
                     visible = "\n".join(tui.screen.display)
-                    tui.require(visible.count("first-value") == 1 and "fourth-value" not in visible,
-                                "unchecking did not hide only that recipe's options")
+                    tui.require(
+                        visible.count("first-value") == 1
+                        and "fourth-value" not in visible,
+                        "unchecking did not hide only that recipe's options",
+                    )
                     tui.send(b" ")
                 # Both selected recipes retain their visible input rows.
                 tui.focus("One")
                 tui.send(b"\t")
-                tui.require("first-value" in tui.selected()[1], "first recipe options disappeared")
+                tui.require(
+                    "first-value" in tui.selected()[1],
+                    "first recipe options disappeared",
+                )
                 tui.focus("fourth")
                 tui.require("fourth-value" in tui.selected()[1], "last input obscured")
-                tui.require(tui.locate("REMOTE SETUP") == anchors["REMOTE SETUP"],
-                            "scrolling fields moved the header")
+                tui.require(
+                    tui.locate("REMOTE SETUP") == anchors["REMOTE SETUP"],
+                    "scrolling fields moved the header",
+                )
                 tui.focus("Many")
                 tui.send(b"\x1bOP")  # Help returns to the same field and geometry.
                 tui.send(b"\x1bOP")
                 tui.require("Many" in tui.selected()[1], "help lost form focus")
-                tui.require(tui.locate("REMOTE SETUP") == anchors["REMOTE SETUP"],
-                            "help moved the dialog")
+                tui.require(
+                    tui.locate("REMOTE SETUP") == anchors["REMOTE SETUP"],
+                    "help moved the dialog",
+                )
                 tui.send(b"\x1b")
                 tui.send(b"\x1b[13;5u")
                 tui.focus("Profile")
-                anchors = {label: tui.locate(label)
-                           for label in ("CONNECT", "Remote", "Profile", "Cancel")}
+                anchors = {
+                    label: tui.locate(label)
+                    for label in ("CONNECT", "Remote", "Profile", "Cancel")
+                }
                 for name in ("One", "Many", "Zero"):
                     tui.send(b"\x1b[C")
-                    tui.require(name in tui.selected()[1], f"profile {name} not selected")
+                    tui.require(
+                        name in tui.selected()[1], f"profile {name} not selected"
+                    )
                     for label, position in anchors.items():
-                        tui.require(tui.locate(label) == position, f"{label} moved for {name}")
+                        tui.require(
+                            tui.locate(label) == position, f"{label} moved for {name}"
+                        )
 
         # The form advertises arrows only for fields where they change a choice.
         with ScreenSession(24, 100) as tui:
             tui.send(ADD_REMOTE)
             tui.require("Remote" in tui.selected()[1], "new form did not focus Remote")
             footer_row = tui.locate("Cancel")[0]
-            tui.require("Choice" not in tui.screen.display[footer_row], "Remote offered Choice")
+            tui.require(
+                "Choice" not in tui.screen.display[footer_row], "Remote offered Choice"
+            )
             tui.send(b"draft-host")
             before = tui.selected()
             tui.send(b"\x1b[C")
             tui.require(tui.selected() == before, "Right changed the editable Remote")
             tui.focus("Zero")
-            tui.require("Queue" in tui.screen.display[footer_row], "recipe omitted checkbox action")
+            tui.require(
+                "Queue" in tui.screen.display[footer_row],
+                "recipe omitted checkbox action",
+            )
             tui.send(b" ")
-            tui.require("[x]" in tui.selected()[1] and "Zero" in tui.selected()[1], "checkbox did not toggle")
+            tui.require(
+                "[x]" in tui.selected()[1] and "Zero" in tui.selected()[1],
+                "checkbox did not toggle",
+            )
 
         # Modifier groups are exact. A release keeps the remaining held modifier,
         # and losing window focus resets stale state even if releases were missed.
@@ -274,16 +353,31 @@ def interaction_checks(binary):
             with ScreenSession(rows, cols) as tui:
                 tui.normal_bar()
                 tui.send(b"\x1b[57441;2u")
-                tui.require("Shift" in tui.footer() and "New" in tui.footer(), "Shift menu missing")
+                tui.require(
+                    "Shift" in tui.footer() and "New" in tui.footer(),
+                    "Shift menu missing",
+                )
                 tui.send(b"\x1b[57441;2:3u")
                 tui.normal_bar()
                 tui.send(b"\x1b[57443;3u")
-                tui.require("Alt" in tui.footer() and "Zero" in tui.footer(), "Alt profile missing")
+                tui.require(
+                    "Alt" in tui.footer() and "Zero" in tui.footer(),
+                    "Alt profile missing",
+                )
                 tui.send(b"\x1b[57442;7u")
-                tui.require("Ctrl+Alt" in tui.footer() and "One" in tui.footer(), "combined group missing")
-                tui.require("Zero" not in tui.footer(), "Alt-only profile leaked into combination")
+                tui.require(
+                    "Ctrl+Alt" in tui.footer() and "One" in tui.footer(),
+                    "combined group missing",
+                )
+                tui.require(
+                    "Zero" not in tui.footer(),
+                    "Alt-only profile leaked into combination",
+                )
                 tui.send(b"\x1b[57442;7:3u")
-                tui.require("Alt" in tui.footer() and "Ctrl" not in tui.footer(), "release lost held Alt")
+                tui.require(
+                    "Alt" in tui.footer() and "Ctrl" not in tui.footer(),
+                    "release lost held Alt",
+                )
                 tui.resize(rows + 2, cols + 3)
                 tui.require("Alt" in tui.footer(), "resize lost held modifier")
                 tui.send(b"\x1b[O")
@@ -304,9 +398,13 @@ def interaction_checks(binary):
                 tui.send(b"\x1b[57441;4u")
                 for shifted in (b"\x1b[90;4u", b"\x1b[122:90;4u"):
                     tui.send(shifted)
-                    tui.require(tui.process.poll() is None, "Shift+Alt+Z launched Alt+Z")
-                    tui.require("Alt+Shift" in tui.footer() and "Zero" not in tui.footer(),
-                                "Shift+Alt offered Alt-only profile")
+                    tui.require(
+                        tui.process.poll() is None, "Shift+Alt+Z launched Alt+Z"
+                    )
+                    tui.require(
+                        "Alt+Shift" in tui.footer() and "Zero" not in tui.footer(),
+                        "Shift+Alt offered Alt-only profile",
+                    )
                 tui.send(b"\x1b[57441;4:3u")
                 tui.send(b"\x1b[57442;7u")
                 tui.send(b"\x1b[122;7u")
@@ -317,12 +415,18 @@ def interaction_checks(binary):
                 # An invalid unmatched query has no target for any profile action.
                 tui.send(b"not a valid address")
                 tui.require("Open" not in tui.footer(), "invalid query offered Open")
-                tui.require(not any(name in tui.footer() for name in ("Zero", "One", "Many")),
-                            "invalid query offered profile cycling")
+                tui.require(
+                    not any(name in tui.footer() for name in ("Zero", "One", "Many")),
+                    "invalid query offered profile cycling",
+                )
                 tui.send(b"\x1b[57443;3u")
-                tui.require("Zero" not in tui.footer(), "invalid query offered Alt profile")
+                tui.require(
+                    "Zero" not in tui.footer(), "invalid query offered Alt profile"
+                )
                 tui.send(b"\x1b[57442;7u")
-                tui.require("One" not in tui.footer(), "invalid query offered Ctrl+Alt profile")
+                tui.require(
+                    "One" not in tui.footer(), "invalid query offered Ctrl+Alt profile"
+                )
                 tui.send(b"\x1b[57442;7:3u")
                 tui.send(b"\x1b[57443;3:3u")
 
@@ -333,32 +437,54 @@ def interaction_checks(binary):
                 tui.send(b"\x1b[F")
                 last_row, last_line = tui.selected()
                 tui.require(hosts[-1] in last_line, "End selection obscured")
-                first_visible = next(line for line in tui.screen.display[1:] if "host-" in line)
+                first_visible = next(
+                    line for line in tui.screen.display[1:] if "host-" in line
+                )
                 tui.send(b"\x1b[A")
                 row, line = tui.selected()
-                tui.require(hosts[-2] in line and row == last_row - 1, "Up jumped the viewport")
-                tui.require(next(line for line in tui.screen.display[1:] if "host-" in line) == first_visible,
-                            "Up changed the first visible host")
+                tui.require(
+                    hosts[-2] in line and row == last_row - 1, "Up jumped the viewport"
+                )
+                tui.require(
+                    next(line for line in tui.screen.display[1:] if "host-" in line)
+                    == first_visible,
+                    "Up changed the first visible host",
+                )
                 tui.send(b"\x1b[15~")
-                tui.require(tui.selected() == (row, line), "refresh moved or obscured selection")
+                tui.require(
+                    tui.selected() == (row, line), "refresh moved or obscured selection"
+                )
                 tui.require("Refreshed" in tui.footer(), "refresh notice not in footer")
                 tui.send(b"\x1b[H")
                 tui.require(hosts[0] in tui.selected()[1], "Home selection missing")
                 tui.send(b"x" * 120 + b"QUERY_TAIL")
-                tui.require("QUERY_TAIL" in tui.screen.display[0], "active query tail clipped")
+                tui.require(
+                    "QUERY_TAIL" in tui.screen.display[0], "active query tail clipped"
+                )
                 tui.resize(rows + 1, cols + 5)
-                tui.require("QUERY_TAIL" in tui.screen.display[0], "resize lost query tail")
+                tui.require(
+                    "QUERY_TAIL" in tui.screen.display[0], "resize lost query tail"
+                )
                 tui.send(b"\x15")
-                tui.require(hosts[0] in tui.selected()[1], "Ctrl+U did not restore hosts")
+                tui.require(
+                    hosts[0] in tui.selected()[1], "Ctrl+U did not restore hosts"
+                )
                 tui.send(b"\x1b[F")
-                tui.require(hosts[-1] in tui.selected()[1], "End selection missing before growth")
+                tui.require(
+                    hosts[-1] in tui.selected()[1],
+                    "End selection missing before growth",
+                )
                 tui.resize(len(hosts) + 4, cols)
-                host_lines = tui.screen.display[1:len(hosts) + 1]
-                tui.require(all(host in line for host, line in zip(hosts, host_lines)),
-                            "growth retained a stale list offset or omitted hosts")
+                host_lines = tui.screen.display[1 : len(hosts) + 1]
+                tui.require(
+                    all(host in line for host, line in zip(hosts, host_lines)),
+                    "growth retained a stale list offset or omitted hosts",
+                )
                 tui.require(hosts[-1] in tui.selected()[1], "growth lost selected host")
                 tui.resize(rows, cols)
-                tui.require(hosts[-1] in tui.selected()[1], "shrink obscured selected host")
+                tui.require(
+                    hosts[-1] in tui.selected()[1], "shrink obscured selected host"
+                )
     print("terminal screen interactions passed")
 
 
@@ -383,20 +509,38 @@ with tempfile.TemporaryDirectory(prefix="shui-pty-") as directory:
     for name in ("ssh", "mosh", "mc", "sftp", "custom-connect"):
         stub = root / "bin" / name
         stub.write_text('#!/bin/sh\nprintf "%s\\n" "$0" "$@" > "$SHUI_TEST_LOG"\n')
-        stub.write_text(stub.read_text() + '[ -z "${SHUI_TEST_DELAY:-}" ] || sleep "$SHUI_TEST_DELAY"\n')
-        stub.write_text(stub.read_text() + 'stty -g > "$SHUI_TEST_LOG.tty"\nprintf "SHUI_HANDOFF\\n"\n')
+        stub.write_text(
+            stub.read_text()
+            + '[ -z "${SHUI_TEST_DELAY:-}" ] || sleep "$SHUI_TEST_DELAY"\n'
+        )
+        stub.write_text(
+            stub.read_text()
+            + 'stty -g > "$SHUI_TEST_LOG.tty"\nprintf "SHUI_HANDOFF\\n"\n'
+        )
         stub.chmod(0o755)
-    child_env = dict(os.environ, HOME=str(root), USER="tester", TERM="xterm",
-                     PATH=str(root / "bin") + os.pathsep + os.environ["PATH"],
-                     SHUI_TEST_LOG=str(root / "command"), XDG_CONFIG_HOME=str(root / "settings"))
+    child_env = dict(
+        os.environ,
+        HOME=str(root),
+        USER="tester",
+        TERM="xterm",
+        PATH=str(root / "bin") + os.pathsep + os.environ["PATH"],
+        SHUI_TEST_LOG=str(root / "command"),
+        XDG_CONFIG_HOME=str(root / "settings"),
+    )
     dump = subprocess.check_output([binary, "--dump"], env=child_env, text=True)
     assert dump.splitlines()[:2] == ["beta:2222", "alpha"], dump
 
     def startup_failure():
         master, slave = pty.openpty()
         try:
-            result = subprocess.run([binary], stdin=slave, stdout=slave, stderr=subprocess.PIPE,
-                                    env=child_env, timeout=5)
+            result = subprocess.run(
+                [binary],
+                stdin=slave,
+                stdout=slave,
+                stderr=subprocess.PIPE,
+                env=child_env,
+                timeout=5,
+            )
             output = bytearray()
             while select.select([master], [], [], 0)[0]:
                 chunk = read_pty(master)
@@ -417,8 +561,16 @@ with tempfile.TemporaryDirectory(prefix="shui-pty-") as directory:
         tty_before = subprocess.check_output(["stty", "-g"], stdin=slave).strip()
         (root / "command.tty").unlink(missing_ok=True)
         (root / "command.setup-tty").unlink(missing_ok=True)
-        process = subprocess.Popen([binary, *args], stdin=slave, stdout=slave, stderr=slave, env=child_env, cwd=root)
+        process = subprocess.Popen(
+            [binary, *args],
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            env=child_env,
+            cwd=root,
+        )
         output = bytearray()
+
         def read_for(seconds):
             end = time.monotonic() + seconds
             while time.monotonic() < end:
@@ -427,6 +579,7 @@ with tempfile.TemporaryDirectory(prefix="shui-pty-") as directory:
                     if not chunk:
                         break
                     output.extend(chunk)
+
         try:
             deadline = time.monotonic() + 5
             while b"SHUI" not in output:
@@ -441,7 +594,10 @@ with tempfile.TemporaryDirectory(prefix="shui-pty-") as directory:
                     for marker in key:
                         while (position := output.find(marker, cursor)) < 0:
                             assert process.poll() is None, output
-                            assert time.monotonic() < deadline, (marker, bytes(output[last_key_start:]))
+                            assert time.monotonic() < deadline, (
+                                marker,
+                                bytes(output[last_key_start:]),
+                            )
                             read_for(0.05)
                         cursor = position + len(marker)
                     continue
@@ -453,18 +609,32 @@ with tempfile.TemporaryDirectory(prefix="shui-pty-") as directory:
                 read_for(0.1)
             wait_pty(process, master, 3, output.extend)
             assert process.returncode == expected_status, output
-            assert termios.tcgetattr(slave) == before, "terminal settings were not restored"
+            assert termios.tcgetattr(slave) == before, (
+                "terminal settings were not restored"
+            )
             handoff = output.find(b"SHUI_HANDOFF")
             cleanup = output[:handoff] if handoff >= 0 else output
-            assert cleanup.rfind(b"\x1b[?25h") > cleanup.rfind(b"\x1b[?25l"), "cursor hidden at handoff/exit"
-            assert cleanup.rfind(b"\x1b[?1049l") > cleanup.rfind(b"\x1b[?1049h"), "alternate screen active"
-            assert b"\x1b[0m" in cleanup[cleanup.rfind(b"\x1b[?1049l"):], "styles not reset"
+            assert cleanup.rfind(b"\x1b[?25h") > cleanup.rfind(b"\x1b[?25l"), (
+                "cursor hidden at handoff/exit"
+            )
+            assert cleanup.rfind(b"\x1b[?1049l") > cleanup.rfind(b"\x1b[?1049h"), (
+                "alternate screen active"
+            )
+            assert b"\x1b[0m" in cleanup[cleanup.rfind(b"\x1b[?1049l") :], (
+                "styles not reset"
+            )
             if b"SHUI_EDITOR" in output:
-                assert (root / "command.editor-tty").read_bytes().strip() == tty_before, "editor inherited modified tty"
+                assert (
+                    root / "command.editor-tty"
+                ).read_bytes().strip() == tty_before, "editor inherited modified tty"
             if (root / "command.setup-tty").exists():
-                assert (root / "command.setup-tty").read_bytes().strip() == tty_before, "setup inherited modified tty"
+                assert (
+                    root / "command.setup-tty"
+                ).read_bytes().strip() == tty_before, "setup inherited modified tty"
             if handoff >= 0:
-                assert (root / "command.tty").read_bytes().strip() == tty_before, "child inherited modified tty settings"
+                assert (root / "command.tty").read_bytes().strip() == tty_before, (
+                    "child inherited modified tty settings"
+                )
             return output
         finally:
             close_pty(process, master, slave)
@@ -484,21 +654,34 @@ with tempfile.TemporaryDirectory(prefix="shui-pty-") as directory:
     child_env["HOME"] = str(root)
     child_env["XDG_CONFIG_HOME"] = str(root / "settings")
 
-    session([b"\x1b[3~", b"ALPHA", "я".encode(), b"\x1b[3~", b"\r"])  # Delete on empty filter and a Unicode character
+    session(
+        [b"\x1b[3~", b"ALPHA", "я".encode(), b"\x1b[3~", b"\r"]
+    )  # Delete on empty filter and a Unicode character
     assert (root / "command").read_text().splitlines()[1:] == ["--", "alpha"]
     # Enhanced text reports base and shifted codepoints. Exercise both editable
     # remote fields through Crossterm, including repeat/release and held Shift.
     shifted_remote = [
-        b"\x1b[57441;2u", b"\x1b[117:85;2u", b"\x1b[117:85;2:3u",
-        b"\x1b[57441;2:3u", b"ser", b"\x1b[50:64;2u",
-        b"shift-input.invalid", b"\x1b[59:58;2u", b"222",
-        b"\x1b[50;1:2u", b"\x1b[50;1:3u",
+        b"\x1b[57441;2u",
+        b"\x1b[117:85;2u",
+        b"\x1b[117:85;2:3u",
+        b"\x1b[57441;2:3u",
+        b"ser",
+        b"\x1b[50:64;2u",
+        b"shift-input.invalid",
+        b"\x1b[59:58;2u",
+        b"222",
+        b"\x1b[50;1:2u",
+        b"\x1b[50;1:3u",
     ]
     for prefix in ([], [ADD_REMOTE]):
         output = session([*prefix, *shifted_remote, b"\r"])
         assert b"\x1b[>15u" in output, "shifted key reporting was not requested"
         assert (root / "command").read_text().splitlines()[1:] == [
-            "-p", "2222", "--", "User@shift-input.invalid"]
+            "-p",
+            "2222",
+            "--",
+            "User@shift-input.invalid",
+        ]
     session([b"beta:2222", b"\x1b[19~", b"\r"])  # F8: SSH to Mosh
     command = (root / "command").read_text().splitlines()
     assert command[0].endswith("/mosh"), command
@@ -509,7 +692,9 @@ with tempfile.TemporaryDirectory(prefix="shui-pty-") as directory:
     command = (root / "command").read_text().splitlines()
     assert command[0].endswith("/ssh"), command
     assert command[1:] == ["-p", "2222", "--", "beta"], command
-    session([b"wrong", b"\x08", b"alphax", b"\x7f", b"\x1b[19~", b"\x1b[19~", b"\r"])  # erase word, backspace, toggle twice back to SSH
+    session(
+        [b"wrong", b"\x08", b"alphax", b"\x7f", b"\x1b[19~", b"\x1b[19~", b"\r"]
+    )  # erase word, backspace, toggle twice back to SSH
     command = (root / "command").read_text().splitlines()
     assert command[0].endswith("/ssh"), command
     assert command[1:] == ["--", "alpha"], command
@@ -521,7 +706,12 @@ with tempfile.TemporaryDirectory(prefix="shui-pty-") as directory:
     # Direct addresses avoid a setup dialog, and only redundant configured users disappear.
     output = session([b"new-direct:2202", b"\r"])
     assert b"connects to" in output
-    assert (root / "command").read_text().splitlines()[1:] == ["-p", "2202", "--", "new-direct"]
+    assert (root / "command").read_text().splitlines()[1:] == [
+        "-p",
+        "2202",
+        "--",
+        "new-direct",
+    ]
     session([b"tester@alpha", b"\r"])
     assert (root / "command").read_text().splitlines()[1:] == ["--", "alpha"]
     (root / ".ssh/config").write_text("Host alpha beta\n User other\n")
@@ -530,7 +720,9 @@ with tempfile.TemporaryDirectory(prefix="shui-pty-") as directory:
     (root / ".ssh/config").write_text("Host alpha beta\n User tester\n")
     session([b"new-settings", b"\x1b[13;5u", b"\r"])
     assert (root / "command").read_text().splitlines()[1:] == ["--", "new-settings"]
-    (root / ".ssh/config").write_text('Match exec "false"\n User other\nHost alpha beta\n User tester\n')
+    (root / ".ssh/config").write_text(
+        'Match exec "false"\n User other\nHost alpha beta\n User tester\n'
+    )
     session([b"tester@alpha", b"\r"])
     assert (root / "command").read_text().splitlines()[1:] == ["--", "tester@alpha"]
     (root / ".ssh/config").write_text("Host alpha beta\n User tester\n")
@@ -548,12 +740,14 @@ with tempfile.TemporaryDirectory(prefix="shui-pty-") as directory:
     (root / ".bash_history").write_text("ssh alpha\nssh -p 2222 beta\n")
     session([b"wrong-filter", b"\x15", b"alpha", b"\r"])
     assert (root / "command").read_text().splitlines()[1:] == ["--", "alpha"]
+
     # Refresh retains both selected identity and profile despite changed history order.
     def changed_hosts():
         with (root / ".ssh/config").open("a") as file:
             file.write("Host alphabeta\n User other\n")
         with (root / ".bash_history").open("a") as file:
             file.write("ssh alphabeta\n")
+
     output = session([b"alpha", b"\x1b[C", changed_hosts, b"\x1b[15~", b"\r"])
     assert b"Refreshed" in output
     command = (root / "command").read_text().splitlines()
@@ -574,32 +768,55 @@ with tempfile.TemporaryDirectory(prefix="shui-pty-") as directory:
     session([b"beta:2222", b"\x1b[C", b"\r"])  # Bash -> Zellij
     command = (root / "command").read_text().splitlines()
     assert command[1:6] == ["-p", "2222", "-tt", "--", "beta"], command
-    # SSH receives one fully quoted remote command, including the multiline script.
+    # SSH receives just the remote application command, without bootstrap code.
     remote_command = "\n".join(command[6:])
     assert "attach --create" in remote_command
     # Execute the actual encoded remote command with an existing mock Zellij.
     zellij = root / "bin/zellij"
-    zellij.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$SHUI_TEST_LOG.zellij"\nread -r line; [ "$line" = terminal-input ]\n')
+    zellij.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$@" > "$SHUI_TEST_LOG.zellij"\nread -r line; [ "$line" = terminal-input ]\n'
+    )
     zellij.chmod(0o755)
-    remote = subprocess.run(["sh", "-c", remote_command], env=child_env, input="terminal-input\n", text=True, capture_output=True, timeout=10)
+    remote = subprocess.run(
+        ["sh", "-c", remote_command],
+        env=child_env,
+        input="terminal-input\n",
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
     assert remote.returncode == 0, remote.stderr
     assert (root / "command.zellij").read_text().splitlines() == [
-        "--config", "/dev/null", "--layout-string", "layout { pane; }",
-        "attach", "--create", "--index", "0", "options",
-        "--show-startup-tips", "false", "--show-release-notes", "false"]
-    session([b"beta:2222", b"\r"])  # Zellij is restored from the single-line history entry.
+        "attach",
+        "--create",
+        "options",
+        "--show-startup-tips",
+        "false",
+        "--show-release-notes",
+        "false",
+    ]
+    session(
+        [b"beta:2222", b"\r"]
+    )  # Zellij is restored from the single-line history entry.
     assert "\n".join((root / "command").read_text().splitlines()[6:]) == remote_command
     # New direct shortcuts and input-bearing forwarding profiles use normal handoff.
     session([b"beta:2222", b"\x1bt"])
     command = (root / "command").read_text().splitlines()
     assert command[1:6] == ["-p", "2222", "-tt", "--", "beta"]
-    assert "exec tmux new-session -A -s main" in "\n".join(command[6:])
+    assert "tmux attach-session || exec tmux new-session" in "\n".join(command[6:])
     session([b"beta:2222", b"\x1bf"])
-    assert (root / "command").read_text().splitlines()[1:] == ["-P", "2222", "--", "beta"]
+    assert (root / "command").read_text().splitlines()[1:] == [
+        "-P",
+        "2222",
+        "--",
+        "beta",
+    ]
     session([b"beta:2222", b"\x1bh"])
-    assert 'shown_boxes = "cpu mem net"' in (root / "command").read_text()
-    for key, flag, value in [(b"\x1b[108;7u", "-L", "127.0.0.1:8080:localhost:80"),
-                             (b"\x1b[100;7u", "-D", "127.0.0.1:1080")]:
+    assert (root / "command").read_text().splitlines()[6:] == ["exec btop"]
+    for key, flag, value in [
+        (b"\x1b[108;7u", "-L", "127.0.0.1:8080:localhost:80"),
+        (b"\x1b[100;7u", "-D", "127.0.0.1:1080"),
+    ]:
         session([b"beta:2222", key, b"\r"])
         args = (root / "command").read_text().splitlines()[1:]
         assert args[:4] == ["-p", "2222", "-N", "-T"], args
@@ -614,7 +831,14 @@ profiles:
     value: literal ; $HOME
 """)
     session([b"beta:2222", b"\r"])
-    assert (root / "command").read_text().splitlines()[1:] == ["-p", "2222", "-tt", "--", "beta", "exec bash -lc '~/bin/work.sh; exec bash -l'"]
+    assert (root / "command").read_text().splitlines()[1:] == [
+        "-p",
+        "2222",
+        "-tt",
+        "--",
+        "beta",
+        "exec bash -lc '~/bin/work.sh; exec bash -l'",
+    ]
     session([b"beta:2222", b"\x1b[C", b"\r"])
     command = (root / "command").read_text().splitlines()
     assert command[0].endswith("/custom-connect"), command
@@ -652,10 +876,18 @@ profiles:
     # Exercise the shipped key-auth and dotfiles recipes with fake tools.
     for name in ("ssh-copy-id", "scp"):
         stub = root / "bin" / name
-        stub.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$SHUI_TEST_LOG.' + name + '"\n')
+        stub.write_text(
+            '#!/bin/sh\nprintf "%s\\n" "$@" > "$SHUI_TEST_LOG.' + name + '"\n'
+        )
         stub.chmod(0o755)
     session([ADD_REMOTE, b"setup@example.org:2200", b"\t", b" ", b"\r"])
-    assert (root / "command.ssh-copy-id").read_text().splitlines() == ["-p", "2200", "-i", str(root / ".ssh/id_ed25519.pub"), "setup@example.org"]
+    assert (root / "command.ssh-copy-id").read_text().splitlines() == [
+        "-p",
+        "2200",
+        "-i",
+        str(root / ".ssh/id_ed25519.pub"),
+        "setup@example.org",
+    ]
     (root / "src/dotfiles").mkdir(parents=True)
     (root / "src/dotfiles/install.sh").write_text("exit 0\n")
     ssh = root / "bin/ssh"
@@ -664,22 +896,37 @@ profiles:
     (root / "command.ssh-copy-id").unlink()
     session([ADD_REMOTE, b"dotfiles@example.org:2201", b"\t", b"\t", b" ", b"\r"])
     assert not (root / "command.ssh-copy-id").exists()
-    assert (root / "command.scp").read_text().splitlines() == ["-P", "2201", "-r", str(root / "src/dotfiles") + "/.", "dotfiles@example.org:src/dotfiles/"]
+    assert (root / "command.scp").read_text().splitlines() == [
+        "-P",
+        "2201",
+        "-r",
+        str(root / "src/dotfiles") + "/.",
+        "dotfiles@example.org:src/dotfiles/",
+    ]
     dotfiles_calls = (root / "command.calls").read_text()
     assert "-i" not in dotfiles_calls.splitlines()
     ssh.write_text(original_ssh)
     # Adding a remote persists through ordinary history, even if no history existed.
     (root / ".bash_history").unlink()
     session([ADD_REMOTE, b"new@example.org:2200", b"\r"])
-    assert (root / "command").read_text().splitlines()[1:] == ["-p", "2200", "--", "new@example.org"]
-    assert "new@example.org:2200" in subprocess.check_output([binary, "--dump"], env=child_env, text=True)
+    assert (root / "command").read_text().splitlines()[1:] == [
+        "-p",
+        "2200",
+        "--",
+        "new@example.org",
+    ]
+    assert "new@example.org:2200" in subprocess.check_output(
+        [binary, "--dump"], env=child_env, text=True
+    )
     before = (root / ".bash_history").read_text()
     session([ADD_REMOTE, b"invalid:0", b"\r", b"\x1b", b"\x03"])
     assert (root / ".bash_history").read_text() == before
     # Configured setup receives escaped target/port and a restored terminal before connect.
     stub = root / "bin/setup-test"
     # Force setup to outlast the inter-key delay, on success and failure.
-    stub.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$SHUI_TEST_LOG.setup"\nstty -g > "$SHUI_TEST_LOG.setup-tty"\nsleep 0.3\nexit "${SETUP_EXIT:-0}"\n')
+    stub.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$@" > "$SHUI_TEST_LOG.setup"\nstty -g > "$SHUI_TEST_LOG.setup-tty"\nsleep 0.3\nexit "${SETUP_EXIT:-0}"\n'
+    )
     stub.chmod(0o755)
     config_file.write_text("""default: SSH
 profiles: [{name: SSH, command: 'ssh -- %h'}]
@@ -689,7 +936,11 @@ configuration_scripts:
     value: literal ; $HOME
 """)
     session([ADD_REMOTE, b"added:2222", b"\t", b" ", b"\r"])
-    assert (root / "command.setup").read_text().splitlines() == ["added", "2222", "literal ; $HOME"]
+    assert (root / "command.setup").read_text().splitlines() == [
+        "added",
+        "2222",
+        "literal ; $HOME",
+    ]
     before = (root / ".bash_history").read_text()
     (root / "command").unlink()
     child_env["SETUP_EXIT"] = "7"
@@ -703,7 +954,11 @@ configuration_scripts:
     (root / "command").unlink(missing_ok=True)
     output = session([b"added:2222", b"\x1bOS", b" ", b"\r", RETURNED, b"\x03"])
     assert b"Configure host" in output and b"completed" in output
-    assert (root / "command.setup").read_text().splitlines() == ["added", "2222", "literal ; $HOME"]
+    assert (root / "command.setup").read_text().splitlines() == [
+        "added",
+        "2222",
+        "literal ; $HOME",
+    ]
     assert not (root / "command").exists(), "configure-only launched a connection"
     assert (root / ".bash_history").read_text() == before
     assert (root / ".ssh/config").read_text() == config_before
@@ -717,7 +972,25 @@ configuration_scripts:
     output = session([b"added:2222", b"\x1bOS", b"\r", b"\x1b", b"\x03"])
     assert b"Choose a setup recipe" in output
     assert not (root / "command.setup").exists()
-    session([b"added:2222", b"\x1bOS", b"\x1b[Z", b"\x1b[Z", b"\x1b[C", b"\t", b"draft", b"\x1b[Z", b"\x1b[D", b"\t", b"\t", b" ", b"\r", RETURNED, b"\x03"])
+    session(
+        [
+            b"added:2222",
+            b"\x1bOS",
+            b"\x1b[Z",
+            b"\x1b[Z",
+            b"\x1b[C",
+            b"\t",
+            b"draft",
+            b"\x1b[Z",
+            b"\x1b[D",
+            b"\t",
+            b"\t",
+            b" ",
+            b"\r",
+            RETURNED,
+            b"\x03",
+        ]
+    )
     assert (root / "command.setup").read_text().splitlines()[:2] == ["added", "2222"]
     # F4 carries a typed address into Add new; Shift+F4 always starts blank.
     session([b"no-such-host", b"\x1bOS", b"\r"])
@@ -743,27 +1016,76 @@ configuration_scripts:
 """)
     # Configure mode uses recipe inputs, skipping even a default profile's required fields.
     setup_config = config_file.read_text()
-    config_file.write_text(setup_config.replace(
-        "profiles: [{name: SSH, command: 'ssh -- %h'}]",
-        """profiles:
+    config_file.write_text(
+        setup_config.replace(
+            "profiles: [{name: SSH, command: 'ssh -- %h'}]",
+            """profiles:
   - name: SSH
     command: ssh -- %h %{input:launch}
-    inputs: [{id: launch, type: promptString, required: true}]"""))
+    inputs: [{id: launch, type: promptString, required: true}]""",
+        )
+    )
     (root / "command").unlink()
-    output = session([b"added:2222", b"\x1bOS", b" ", b"\r",
-                      b"configure-value", b"\t", b"\x1b[C", b"\x1b\r", RETURNED, b"\x03"], rows=9, cols=90)
+    output = session(
+        [
+            b"added:2222",
+            b"\x1bOS",
+            b" ",
+            b"\r",
+            b"configure-value",
+            b"\t",
+            b"\x1b[C",
+            b"\x1b\r",
+            RETURNED,
+            b"\x03",
+        ],
+        rows=9,
+        cols=90,
+    )
     assert b"is required" in output and b"completed" in output
-    assert (root / "command.setup").read_text().splitlines() == ["added", "configure-value", "full"]
+    assert (root / "command.setup").read_text().splitlines() == [
+        "added",
+        "configure-value",
+        "full",
+    ]
     assert not (root / "command").exists()
     config_file.write_text(setup_config)
     literal = "a ' ; $(touch SHOULD_NOT_EXIST) %{input:mode}"
-    output = session([ADD_REMOTE, b"inputs-host", b"\t", b" ", b"\r", literal.encode(), b"\x1bOP", b"\x1b[6~", b"\x1bOP", b"\t", b"\x1b[C",
-                       b"\x1b[Z", b"\x1b[Z", b" ", b" ", b"\r"], rows=9, cols=90)
+    output = session(
+        [
+            ADD_REMOTE,
+            b"inputs-host",
+            b"\t",
+            b" ",
+            b"\r",
+            literal.encode(),
+            b"\x1bOP",
+            b"\x1b[6~",
+            b"\x1bOP",
+            b"\t",
+            b"\x1b[C",
+            b"\x1b[Z",
+            b"\x1b[Z",
+            b" ",
+            b" ",
+            b"\r",
+        ],
+        rows=9,
+        cols=90,
+    )
     assert b"is required" in output
-    assert (root / "command.setup").read_text().splitlines() == ["inputs-host", literal, "full"]
-    assert literal not in (root / ".bash_history").read_text(), "setup values must not enter history"
+    assert (root / "command.setup").read_text().splitlines() == [
+        "inputs-host",
+        literal,
+        "full",
+    ]
+    assert literal not in (root / ".bash_history").read_text(), (
+        "setup values must not enter history"
+    )
     before = (root / ".bash_history").read_text()
-    session([ADD_REMOTE, b"cancelled", b"\t", b" ", b"\t", b"discard me", b"\x1b", b"\x03"])
+    session(
+        [ADD_REMOTE, b"cancelled", b"\t", b" ", b"\t", b"discard me", b"\x1b", b"\x03"]
+    )
     assert (root / ".bash_history").read_text() == before
     # Generators run on selection, cache results in this dialog, and pass resolved choices.
     config_file.write_text("""default: SSH
@@ -791,12 +1113,21 @@ configuration_scripts:
     session([b"\x03"])
     assert not (root / "generator-runs").exists(), "generators ran during config load"
     session([ADD_REMOTE, b"generated", b"\t", b" ", b" ", b" ", b"\r"])
-    assert (root / "command.setup").read_text().splitlines() == ["generated text", "second"]
-    assert (root / "generator-runs").read_text().splitlines() == ["run"], "generator was rerun instead of cached"
+    assert (root / "command.setup").read_text().splitlines() == [
+        "generated text",
+        "second",
+    ]
+    assert (root / "generator-runs").read_text().splitlines() == ["run"], (
+        "generator was rerun instead of cached"
+    )
     (root / "command.setup").unlink()
-    output = session([ADD_REMOTE, b"broken", b"\t", b"\t", b" ", b"\r", b"\x1b", b"\x03"])
+    output = session(
+        [ADD_REMOTE, b"broken", b"\t", b"\t", b" ", b"\r", b"\x1b", b"\x03"]
+    )
     assert b"generator test failure" in output
-    assert not (root / "command.setup").exists(), "failed generator allowed setup to run"
+    assert not (root / "command.setup").exists(), (
+        "failed generator allowed setup to run"
+    )
     # Availability filters choices, preserves original script identity, and skips generators.
     config_file.write_text("""default: SSH
 profiles: [{name: SSH, command: 'ssh -- %h'}]
@@ -824,7 +1155,9 @@ configuration_scripts:
     config_file.write_text(original_config)
     (root / ".ssh/id_ed25519").unlink()  # Public files alone do not make a keypair.
     output = session([ADD_REMOTE, b"no-keys", b"\t", b" ", b" ", b"\r"])
-    assert not (root / ".ssh/id_ed25519").exists(), "opening setup must not generate keys"
+    assert not (root / ".ssh/id_ed25519").exists(), (
+        "opening setup must not generate keys"
+    )
     assert (root / "command").read_text().splitlines()[1:] == ["--", "no-keys"]
     (root / ".ssh/id_ed25519").write_text("fake private key")
     output = session([ADD_REMOTE, b"\t", b" ", b"\x1b", b"\x03"])
@@ -832,7 +1165,21 @@ configuration_scripts:
     config_file.write_text(original_config)
     # Help is embedded and returns to the same filter/profile without launching anything.
     before = (root / ".bash_history").read_text()
-    output = session([b"\x1bOP", b"\x1b[F", b"\x1b[H", b"\t", b"\x1b[6~", b"\x1b[5~", b"\x1b[Z", b"\x1bOP", b"\x03"], rows=10, cols=40)
+    output = session(
+        [
+            b"\x1bOP",
+            b"\x1b[F",
+            b"\x1b[H",
+            b"\t",
+            b"\x1b[6~",
+            b"\x1b[5~",
+            b"\x1b[Z",
+            b"\x1bOP",
+            b"\x03",
+        ],
+        rows=10,
+        cols=40,
+    )
     assert b"HELP" in output and b"Profiles" in output
     assert b"Setting up a remote" not in output, "host help offered dialog-only topics"
     assert (root / ".bash_history").read_text() == before
@@ -840,10 +1187,19 @@ configuration_scripts:
     session([b"alpha", b"\x1b[C", b"\x1bOP", b"\x1b[C", b"\x1bOP", b"\r"])
     assert (root / "command").read_text().splitlines()[0].endswith("/mosh")
     assert (root / "command").read_text().splitlines()[1:] == ["--", "alpha"]
-    output = session([ADD_REMOTE, b"help-host:2222", b"\x1bOP", b"\t", b"\x1b[D", b"\x1bOP", b"\r"])
+    output = session(
+        [ADD_REMOTE, b"help-host:2222", b"\x1bOP", b"\t", b"\x1b[D", b"\x1bOP", b"\r"]
+    )
     assert b"Setting up a remote" in output
-    assert b"Profiles" not in output and b"Keys" in output, "dialog help should offer only setup and active keys"
-    assert (root / "command").read_text().splitlines()[1:] == ["-p", "2222", "--", "help-host"]
+    assert b"Profiles" not in output and b"Keys" in output, (
+        "dialog help should offer only setup and active keys"
+    )
+    assert (root / "command").read_text().splitlines()[1:] == [
+        "-p",
+        "2222",
+        "--",
+        "help-host",
+    ]
     # Unbound Ctrl+Q must not quit the menu or close help/dialogs.
     session([b"\x11", b"alpha", b"\r"])
     assert (root / "command").read_text().splitlines()[1:] == ["--", "alpha"]
@@ -852,15 +1208,35 @@ configuration_scripts:
     assert (root / "command").read_text().splitlines()[1:] == ["--", "ctrlq-host"]
     # Preparation runs with a restored tty and must succeed before connection/history.
     prepare = root / "bin/prepare-test"
-    prepare.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$SHUI_TEST_LOG.prepare"\nstty -g > "$SHUI_TEST_LOG.setup-tty"\nprintf "Install test dependency? [y/N] "\nread -r reply\n[ "$reply" = y ]\n')
+    prepare.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$@" > "$SHUI_TEST_LOG.prepare"\nstty -g > "$SHUI_TEST_LOG.setup-tty"\nprintf "Install test dependency? [y/N] "\nread -r reply\n[ "$reply" = y ]\n'
+    )
     prepare.chmod(0o755)
-    config_file.write_text("default: SSH\nprofiles: [{name: SSH, command: 'ssh -- %h', prepare_command: 'prepare-test %h %p %{literal}', literal: 'a ; $HOME'}]\n")
+    config_file.write_text(
+        "default: SSH\nprofiles: [{name: SSH, command: 'ssh -- %h', prepare_command: 'prepare-test %h %p %{literal}', literal: 'a ; $HOME'}]\n"
+    )
     before = (root / ".bash_history").read_text()
     (root / "command").unlink(missing_ok=True)
-    output = session([b"help-host:2222", b"\r", (b"Install test dependency? [y/N] ",), b"n\n", (b"\x1b[?1049h",), b"\x03"])
+    output = session(
+        [
+            b"help-host:2222",
+            b"\r",
+            (b"Install test dependency? [y/N] ",),
+            b"n\n",
+            (b"\x1b[?1049h",),
+            b"\x03",
+        ]
+    )
     assert b"preparation cancelled or failed" in output
-    assert not (root / "command").exists() and (root / ".bash_history").read_text() == before
-    assert (root / "command.prepare").read_text().splitlines() == ["help-host", "2222", "a ; $HOME"]
+    assert (
+        not (root / "command").exists()
+        and (root / ".bash_history").read_text() == before
+    )
+    assert (root / "command.prepare").read_text().splitlines() == [
+        "help-host",
+        "2222",
+        "a ; $HOME",
+    ]
     session([b"help-host:2222", b"\r", (b"Install test dependency? [y/N] ",), b"y\n"])
     assert (root / "command").read_text().splitlines()[1:] == ["--", "help-host"]
     assert "prepare-test" not in (root / ".bash_history").read_text()
@@ -881,20 +1257,32 @@ configuration_scripts:
     available_command: touch "$HOME/unexpected-setup-check"
     command: true
 """)
-    for flag in ('--dump', '--help', '--version'):
+    for flag in ("--dump", "--help", "--version"):
         subprocess.run([binary, flag], env=child_env, capture_output=True, check=True)
-    assert not (root / "profile-checks").exists(), "noninteractive mode ran availability checks"
+    assert not (root / "profile-checks").exists(), (
+        "noninteractive mode ran availability checks"
+    )
     (root / ".bash_history").write_text("mosh alpha\n")
-    output = session([b"alpha", b"\x1b[C", b"\x1b[D", b"\x1b[19~", b"\x1bOP", b"\x1bOP", b"\r"])
-    assert (root / "profile-checks").read_text().splitlines() == ["missing", "ssh", "mosh"]
+    output = session(
+        [b"alpha", b"\x1b[C", b"\x1b[D", b"\x1b[19~", b"\x1bOP", b"\x1bOP", b"\r"]
+    )
+    assert (root / "profile-checks").read_text().splitlines() == [
+        "missing",
+        "ssh",
+        "mosh",
+    ]
     assert not (root / "unexpected-setup-check").exists()
     assert b"Missing" not in output and b"command-that-does-not-exist" not in output
-    assert (root / "command").read_text().splitlines()[0].endswith('/ssh')
-    assert (root / "command").read_text().splitlines()[1:] == ['--', 'alpha']
+    assert (root / "command").read_text().splitlines()[0].endswith("/ssh")
+    assert (root / "command").read_text().splitlines()[1:] == ["--", "alpha"]
     # All unavailable is an actionable error, without entering the alternate screen.
-    config_file.write_text("default: Missing\nprofiles: [{name: Missing, available_command: 'exit 1', command: 'ssh %h'}]\n")
+    config_file.write_text(
+        "default: Missing\nprofiles: [{name: Missing, available_command: 'exit 1', command: 'ssh %h'}]\n"
+    )
     result = startup_failure()
-    assert result.returncode != 0 and b"no launch profiles are available" in result.stderr
+    assert (
+        result.returncode != 0 and b"no launch profiles are available" in result.stderr
+    )
     assert b"\x1b[?1049h" not in result.stdout
     config_file.write_text(original_config)
     config_file.write_text("""default: SSH
@@ -911,17 +1299,21 @@ profiles:
     ]:
         session([b"alpha", shortcut])
         command = (root / "command").read_text().splitlines()
-        assert command[0].endswith('/' + program) and command[1:] == arguments, command
+        assert command[0].endswith("/" + program) and command[1:] == arguments, command
     # Profile cycling and shortcuts also work for valid addresses absent from history/config.
     session([b"direct-cycle", b"\x1b[C", b"\r"])
     command = (root / "command").read_text().splitlines()
-    assert command[0].endswith('/mosh') and command[1:] == ["--", "direct-cycle"], command
+    assert command[0].endswith("/mosh") and command[1:] == ["--", "direct-cycle"], (
+        command
+    )
     session([b"direct-shortcut", b"\x1b\x18"])
     command = (root / "command").read_text().splitlines()
-    assert command[0].endswith('/custom-connect') and command[1:] == ["direct-shortcut"], command
+    assert command[0].endswith("/custom-connect") and command[1:] == [
+        "direct-shortcut"
+    ], command
     # The directly launched profile is restored on the next ordinary Enter.
     session([b"alpha", b"\r"])
-    assert (root / "command").read_text().splitlines()[0].endswith('/custom-connect')
+    assert (root / "command").read_text().splitlines()[0].endswith("/custom-connect")
     before = (root / ".bash_history").read_text()
     (root / "command").unlink()
     session([b"m", b"\x03"])  # Plain typing must not launch the Alt+M profile.
@@ -933,7 +1325,9 @@ profiles:
     config_file.write_text(original_config)
     # Fuzzy abbreviations and complete user-specific SSH config hints.
     (root / ".bash_history").write_text("ssh alpha\n")
-    (root / ".ssh/config").write_text("  # Production note\nHost alpha # primary\n User tester\n HostName 192.0.2.10\n Port 2222\n")
+    (root / ".ssh/config").write_text(
+        "  # Production note\nHost alpha # primary\n User tester\n HostName 192.0.2.10\n Port 2222\n"
+    )
     output = session([b"aph", b"\r"])
     assert b"Production note" in output
     assert b"Host alpha # primary" in output
@@ -957,15 +1351,32 @@ profiles:
       - {id: argument, type: promptString, required: true}
 """)
     before = (root / ".bash_history").read_text()
-    output = session([b"alpha", b"\x1b[13;5u", b"\x08", b"other:2222", b"\t", b"\x1b[C", b"\r", b"literal; $(false)", b"\r"])
+    output = session(
+        [
+            b"alpha",
+            b"\x1b[13;5u",
+            b"\x08",
+            b"other:2222",
+            b"\t",
+            b"\x1b[C",
+            b"\r",
+            b"literal; $(false)",
+            b"\r",
+        ]
+    )
     assert b"CONNECT" in output and b"required" in output
-    assert (root / "command").read_text().splitlines()[1:] == ["other", "literal; $(false)"]
+    assert (root / "command").read_text().splitlines()[1:] == [
+        "other",
+        "literal; $(false)",
+    ]
     assert (root / ".bash_history").read_text() == before
     session([b"alpha", b"\x1bx", b"shortcut", b"\r"])
     assert (root / "command").read_text().splitlines()[1:] == ["alpha", "shortcut"]
 
     # Return mode restores the child tty and then preserves the filter.
-    config_file.write_text("default: SSH\nprofiles: [{name: SSH, command: 'ssh -- %h'}]\n")
+    config_file.write_text(
+        "default: SSH\nprofiles: [{name: SSH, command: 'ssh -- %h'}]\n"
+    )
     child_env["SHUI_TEST_DELAY"] = "0.3"  # Exceed the old fixed inter-key delay.
     output = session([b"alpha", b"\x1b\r", RETURNED, b"\x1b\r", RETURNED, b"\x03"])
     del child_env["SHUI_TEST_DELAY"]
@@ -973,15 +1384,19 @@ profiles:
 
     # Editor handoff, valid reload, and invalid edits retaining the active config.
     editor = root / "bin/test-editor"
-    editor.write_text('#!/bin/sh\nstty -g > "$SHUI_TEST_LOG.editor-tty"\ncp "$HOME/edited.yml" "$1"\nprintf "SHUI_EDITOR\\n"\n')
+    editor.write_text(
+        '#!/bin/sh\nstty -g > "$SHUI_TEST_LOG.editor-tty"\ncp "$HOME/edited.yml" "$1"\nprintf "SHUI_EDITOR\\n"\n'
+    )
     editor.chmod(0o755)
     child_env["VISUAL"] = str(editor)
     child_env["EDITOR"] = str(root / "missing-editor")
-    (root / "edited.yml").write_text("default: Custom\nprofiles: [{name: Custom, command: 'custom-connect %h'}]\n")
+    (root / "edited.yml").write_text(
+        "default: Custom\nprofiles: [{name: Custom, command: 'custom-connect %h'}]\n"
+    )
     output = session([b"alpha", b"\x1b[20~", RETURNED, b"\r"])
     assert output.count(b"SHUI_EDITOR") == 1
     assert b"CONFIGURATION" not in output
-    assert (root / "command").read_text().splitlines()[0].endswith('/custom-connect')
+    assert (root / "command").read_text().splitlines()[0].endswith("/custom-connect")
     # Explicit EDITOR wins; empty values defer to the system editor selector.
     child_env["VISUAL"] = " "
     child_env["EDITOR"] = str(editor)
@@ -995,7 +1410,9 @@ profiles:
     child_env["EDITOR"] = ""
     shutil.copy2(editor, root / "bin/mcedit")
     selector = root / "bin/sensible-editor"
-    selector.write_text('#!/bin/sh\n[ -z "${VISUAL:-}" ] && [ -z "${EDITOR:-}" ] || exit 9\nprintf "SYSTEM_EDITOR\\n"\nexec mcedit "$@"\n')
+    selector.write_text(
+        '#!/bin/sh\n[ -z "${VISUAL:-}" ] && [ -z "${EDITOR:-}" ] || exit 9\nprintf "SYSTEM_EDITOR\\n"\nexec mcedit "$@"\n'
+    )
     selector.chmod(0o755)
     shutil.copy2(editor, root / "bin/editor")
     shutil.copy2(editor, root / "bin/vi")
@@ -1005,7 +1422,7 @@ profiles:
     assert b"Configuration not reloaded" in output and b"SHUI_EDITOR" not in output
     child_env["VISUAL"] = " "
     selector_source = selector.read_text()
-    selector.write_text('#!/bin/sh\nexit 7\n')
+    selector.write_text("#!/bin/sh\nexit 7\n")
     output = session([b"\x1b[20~", RETURNED, b"\x1b", b"\x03"])
     assert b"Editor exited" in output and b"SHUI_EDITOR" not in output
     selector.write_text(selector_source)
@@ -1017,10 +1434,22 @@ profiles:
     child_env["PATH"] = previous_path
     child_env["VISUAL"] = str(editor)
     (root / "edited.yml").write_text("profiles: [broken\n")
-    output = session([b"alpha", b"\x1b[20~", RETURNED, b"\x1bOP", b"\x1bOP", b"\r", RETURNED, b"\x1b", b"\r"])
+    output = session(
+        [
+            b"alpha",
+            b"\x1b[20~",
+            RETURNED,
+            b"\x1bOP",
+            b"\x1bOP",
+            b"\r",
+            RETURNED,
+            b"\x1b",
+            b"\r",
+        ]
+    )
     assert output.count(b"SHUI_EDITOR") == 2
     assert b"Configuration not reloaded" in output
-    assert (root / "command").read_text().splitlines()[0].endswith('/custom-connect')
+    assert (root / "command").read_text().splitlines()[0].endswith("/custom-connect")
     config_file.write_text(original_config)
     # App bindings replace defaults, remain scoped, and drive both dispatch and hints.
     config_file.write_text("""default: SSH
@@ -1061,14 +1490,19 @@ keybindings:
     assert output.count(b"SHUI_HANDOFF") == 1
     session([b"\x1bOQ", b"new-rebound", b"\x1bOR"])
     assert (root / "command").read_text().splitlines()[1:] == ["--", "new-rebound"]
-    config_file.write_text(config_file.read_text() + "\nconfiguration_scripts: [{name: Rebound setup, command: 'setup-test %h'}]\n")
+    config_file.write_text(
+        config_file.read_text()
+        + "\nconfiguration_scripts: [{name: Rebound setup, command: 'setup-test %h'}]\n"
+    )
     (root / "command").unlink()
     output = session([b"alpha", b"\x1b[20~", b" ", b"\x1bOR", RETURNED, b"\x11"])
     assert b"completed" in output and b"Apply" in output
     assert (root / "command.setup").read_text().splitlines() == ["alpha"]
     assert not (root / "command").exists()
     # Editor error actions use their own bindings and help returns to the error screen.
-    session([b"alpha", b"\x1b[21~", RETURNED, b"\x1b[17~", b"x", b"\x1b[18~", b"\x1bOR"])
+    session(
+        [b"alpha", b"\x1b[21~", RETURNED, b"\x1b[17~", b"x", b"\x1b[18~", b"\x1bOR"]
+    )
     assert (root / "command").read_text().splitlines()[1:] == ["--", "alpha"]
     config_file.write_text("""default: SSH
 profiles: [{name: SSH, key: Ctrl+C, command: 'ssh -- %h'}]
@@ -1085,7 +1519,9 @@ profiles:
 """)
     output = session([b"alpha", b"\x1b\r", b"\r", RETURNED, b"\x03"])
     assert output.count(b"SHUI_HANDOFF") == 1
-    config_file.write_text("default: Fail\nprofiles: [{name: Fail, command: 'exit 7'}]\n")
+    config_file.write_text(
+        "default: Fail\nprofiles: [{name: Fail, command: 'exit 7'}]\n"
+    )
     session([b"alpha", b"\x1b\r", RETURNED, b"\x03"])
     config_file.write_text(original_config)
     # Enhanced keyboard repeat events still edit the filter.
@@ -1097,25 +1533,48 @@ profiles:
   - {name: SSH, key: Alt+S, command: 'ssh -- %h'}
   - {name: Special, key: Ctrl+Alt+X, command: 'custom-connect %h'}
 """)
-    output = session([b"alpha", b"\x1b[57443;3u", b"\x1b[57442;7u", b"\x1b[57442;7:3u", b"\x1b[57443;3:3u", b"\r"])
+    output = session(
+        [
+            b"alpha",
+            b"\x1b[57443;3u",
+            b"\x1b[57442;7u",
+            b"\x1b[57442;7:3u",
+            b"\x1b[57443;3:3u",
+            b"\r",
+        ]
+    )
     assert b"Special" in output
     assert (root / "command").read_text().splitlines()[1:] == ["--", "alpha"]
     output = session([b"alpha", b"\x1b?", b"\x1b?", b"\r"])
     assert (root / "command").read_text().splitlines()[1:] == ["--", "alpha"]
     # Shift gets its own menu; releasing it restores the ordinary F4 setup action.
-    output = session([b"alpha", b"\x1b[57441;2u", b"\x1b[57441;2:3u", b"\x1bOS", b"\x1b", b"\r"])
+    output = session(
+        [b"alpha", b"\x1b[57441;2u", b"\x1b[57441;2:3u", b"\x1bOS", b"\x1b", b"\r"]
+    )
     assert b"Shift" in output and b"New" in output and b"Configure host" in output
     assert (root / "command").read_text().splitlines()[1:] == ["--", "alpha"]
     output = session([b"alpha", b"\x1b[1;2P", b"\x1b[1;2P", b"\r"])
     assert b"Shift" in output
     assert (root / "command").read_text().splitlines()[1:] == ["--", "alpha"]
     # Revealing and releasing keys also works inside help and connection dialogs.
-    session([b"alpha", b"\x1bOP", b"\x1b[57443;3u", b"\x1b[57443;3:3u", b"\x1bOP", b"\x1b[13;5u", b"\x1b[57442;5u", b"\x1b[57442;5:3u", b"\r"])
+    session(
+        [
+            b"alpha",
+            b"\x1bOP",
+            b"\x1b[57443;3u",
+            b"\x1b[57443;3:3u",
+            b"\x1bOP",
+            b"\x1b[13;5u",
+            b"\x1b[57442;5u",
+            b"\x1b[57442;5:3u",
+            b"\r",
+        ]
+    )
     assert (root / "command").read_text().splitlines()[1:] == ["--", "alpha"]
     config_file.write_text(original_config)
     # Missing pairs offer generation but merely opening/cancelling never generates a key.
     keygen = root / "bin/ssh-keygen"
-    keygen.write_text('''#!/bin/sh
+    keygen.write_text("""#!/bin/sh
 set -eu
 printf '%s\\n' "$@" > "$SHUI_TEST_LOG.keygen"
 stty -g > "$SHUI_TEST_LOG.keygen-tty"
@@ -1126,7 +1585,7 @@ while [ "$#" -gt 0 ]; do
 done
 printf 'generated private key' > "$private"
 printf 'generated public key' > "$private.pub"
-''')
+""")
     keygen.chmod(0o755)
     for keyfile in (root / ".ssh").glob("id_*"):
         keyfile.unlink()
@@ -1151,9 +1610,23 @@ printf 'generated public key' > "$private.pub"
     (root / "keygen-fail").unlink()
     # Key-auth generates before copying, with prompts on the restored tty.
     session([ADD_REMOTE, b"generated:2202", b"\t", b" ", b"\r"])
-    assert (root / "command.keygen").read_text().splitlines() == ["-q", "-t", "ed25519", "-f", str(root / ".ssh/id_ed25519")]
-    assert (root / "command.ssh-copy-id").read_text().splitlines() == ["-p", "2202", "-i", str(root / ".ssh/id_ed25519.pub"), "generated"]
-    assert (root / "command.keygen-tty").read_bytes() == (root / "command.tty").read_bytes()
+    assert (root / "command.keygen").read_text().splitlines() == [
+        "-q",
+        "-t",
+        "ed25519",
+        "-f",
+        str(root / ".ssh/id_ed25519"),
+    ]
+    assert (root / "command.ssh-copy-id").read_text().splitlines() == [
+        "-p",
+        "2202",
+        "-i",
+        str(root / ".ssh/id_ed25519.pub"),
+        "generated",
+    ]
+    assert (root / "command.keygen-tty").read_bytes() == (
+        root / "command.tty"
+    ).read_bytes()
     # Dotfiles installation uses normal SSH auth and does not generate/copy a key.
     for name in ("id_ed25519", "id_ed25519.pub"):
         (root / ".ssh" / name).unlink(missing_ok=True)
@@ -1162,18 +1635,33 @@ printf 'generated public key' > "$private.pub"
     session([ADD_REMOTE, b"generated-dotfiles:2202", b"\t", b"\t", b" ", b"\r"])
     assert not (root / "command.keygen").exists()
     assert not (root / "command.ssh-copy-id").exists()
-    assert (root / "command.scp").read_text().splitlines() == ["-P", "2202", "-r", str(root / "src/dotfiles") + "/.", "generated-dotfiles:src/dotfiles/"]
+    assert (root / "command.scp").read_text().splitlines() == [
+        "-P",
+        "2202",
+        "-r",
+        str(root / "src/dotfiles") + "/.",
+        "generated-dotfiles:src/dotfiles/",
+    ]
     # Queued recipes run in configuration order; a failure prevents later work
     # and the connection, even when recipes were checked in reverse order.
-    config_file.write_text('''default: SSH
+    config_file.write_text("""default: SSH
 profiles: [{name: SSH, command: 'ssh -- %h'}]
 configuration_scripts:
   - name: First queued
     command: 'echo first >> "$HOME/queue-log"; test ! -f "$HOME/queue-fail"'
   - name: Second queued
     command: 'echo second >> "$HOME/queue-log"'
-''')
-    queue_keys = [ADD_REMOTE, b"queued:2202", b"\t", b"\t", b" ", b"\x1b[A", b" ", b"\r"]
+""")
+    queue_keys = [
+        ADD_REMOTE,
+        b"queued:2202",
+        b"\t",
+        b"\t",
+        b" ",
+        b"\x1b[A",
+        b" ",
+        b"\r",
+    ]
     session(queue_keys)
     assert (root / "queue-log").read_text().splitlines() == ["first", "second"]
     (root / "queue-log").unlink()
@@ -1203,23 +1691,34 @@ with open('/dev/tty', 'wb', buffering=0):
     pass
 os.execv(sys.argv[1], [sys.argv[1]])
 """
-    process = subprocess.Popen([sys.executable, "-c", launcher, str(binary)],
-                               stdin=slave, stdout=slave, stderr=slave,
-                               env=child_env, start_new_session=True)
+    process = subprocess.Popen(
+        [sys.executable, "-c", launcher, str(binary)],
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        env=child_env,
+        start_new_session=True,
+    )
     try:
         output = bytearray()
         deadline = time.monotonic() + 5
-        while b'SHUI' not in output and time.monotonic() < deadline:
+        while b"SHUI" not in output and time.monotonic() < deadline:
             if select.select([master], [], [], 0.05)[0]:
                 chunk = read_pty(master)
                 if not chunk:
                     break
                 output.extend(chunk)
-        assert b'SHUI' in output, output
-        assert not (root / 'tty-leak').exists(), 'background check accessed the controlling terminal'
-        os.write(master, b'\x03')
-        assert wait_pty(process, master, 3, output.extend) == 0, 'TTY probe did not exit successfully'
+        assert b"SHUI" in output, output
+        assert not (root / "tty-leak").exists(), (
+            "background check accessed the controlling terminal"
+        )
+        os.write(master, b"\x03")
+        assert wait_pty(process, master, 3, output.extend) == 0, (
+            "TTY probe did not exit successfully"
+        )
     finally:
         close_pty(process, master, slave)
     faulthandler.cancel_dump_traceback_later()
-    print("PASS: discovery, editing, per-entry profiles and history restore, SSH/Mosh/MC/script/custom handoff, config validation, adding/configuring remotes and setup recipes, embedded help, terminal restoration")
+    print(
+        "PASS: discovery, editing, per-entry profiles and history restore, SSH/Mosh/MC/script/custom handoff, config validation, adding/configuring remotes and setup recipes, embedded help, terminal restoration"
+    )
