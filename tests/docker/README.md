@@ -10,6 +10,8 @@ This opt-in mode uses privileged containers with private cgroup namespaces, with
 
 Recursive logging tests run real QEMU guest agents in two nested chroots. A virsh fixture supplies discovery and transport; guest execution and filesystem cleanup use the real agent protocol. This covers nested guest execution and inaccessible-agent reporting, but not full VM boot or libvirt domain discovery. Alpine is excluded because this test mode requires systemd. `--keep` retains resources for debugging.
 
+Optional-runtime wiring is tested with a `runsc` forwarding fixture backed by the installed runc: Docker must load the runtime and execute a container through it while preserving unrelated daemon settings. This verifies registration/reload, not actual gVisor isolation, runq/KVM guests, NVIDIA drivers, or GPU execution. Real optional-runtime packages remain dependent on enabled repositories.
+
 ## Profiles and non-service recipes
 
 Run from the repository root with Docker, Python 3, and the pinned Rust toolchain:

@@ -6,6 +6,8 @@
 # Profile fields: name (unique), command (required), key, available_command,
 # prepare_command, inputs, shell, prepare_shell, port_args, and arbitrary string
 # fields referenced by %{field}. Windows overrides use direct commands/PowerShell.
+# Inputs: promptString for text, pickString for one choice, checkbox for independent
+# options (default: true/false; Space toggles; templates receive true/false).
 # default names a profile. Left/Right changes only the selected host's profile.
 #
 # Templates: %h = user@host; %p = explicit port or empty; %t = user@host[:port];
@@ -136,33 +138,55 @@ configuration_scripts:
         required: true
         # Emit YAML. Only list public keys with a matching private-key file.
         command: |
-          found=0
           printf 'options:\n'
           for public in "$HOME"/.ssh/id_*.pub; do
             [ -f "$public" ] && [ -f "${public%.pub}" ] || continue
             name=${public##*/}
             escaped=$(printf '%s' "$name" | sed "s/'/''/g")
             printf "  - '%s'\n" "$escaped"
-            found=1
           done
-          [ "$found" = 1 ] || printf "  - 'Generate new Ed25519 key'\n"
+          printf "  - 'Generate new Ed25519 key'\n"
+      - id: new_key
+        type: promptString
+        description: New key filename in ~/.ssh (generation only)
+        default: id_ed25519
+        required: true
+        pattern: '[A-Za-z0-9][A-Za-z0-9_.-]*'
+        validation_message: Use a filename without slashes; choose an unused name
       - &ssh_key_expiry
         id: expiry
         type: pickString
         description: Key expiry
         options: [never, 8 hours, day, week, month, year]
         default: never
-        # Durations start on the server after ssh-copy-id: month = 30 days,
+        # Durations start on the server after key installation: month = 30 days,
         # year = 365 days. UTC avoids local time-zone / daylight-saving ambiguity.
         # never removes expiry-time from this key; it does not remove other options.
-    command: sh -c %{setup_script} -- %h %p %{prepare_key} %{input:key} %{expiry_remote}
+    command: sh -c %{setup_script} -- %h %p %{prepare_key} %{input:key} %{expiry_remote} %{input:new_key} %{install_key_remote}
     setup_script: |
       set -eu
       host=$1
       port=$2
-      key=$(sh -c "$3" -- "$4")
-      ssh-copy-id ${port:+-p "$port"} -i "$key" "$host"
+      key=$(sh -c "$3" -- "$4" "$6")
+      cat "$key" | ssh ${port:+-p "$port"} -- "$host" "$7"
       cat "$key" | ssh ${port:+-p "$port"} -i "${key%.pub}" -- "$host" "$5"
+    install_key_remote: sh -c %{install_key}
+    install_key: |
+      set -eu
+      umask 077
+      mkdir -p "$HOME/.ssh"
+      file="$HOME/.ssh/authorized_keys"
+      test ! -L "$file" || { echo 'Refusing symlinked authorized_keys.' >&2; exit 1; }
+      test ! -e "$file" || test -f "$file" || exit 1
+      IFS= read -r key || test -n "$key"
+      fingerprint=$(printf '%s\n' "$key" | ssh-keygen -lf - | awk '{print $2}')
+      test -n "$fingerprint" || { echo 'Invalid public key.' >&2; exit 1; }
+      # Check key identity, not whether some other configured key can log in.
+      if test -s "$file" && ssh-keygen -lf "$file" | awk -v key="$fingerprint" '$2 == key {found=1} END {exit !found}'; then
+        exit 0
+      fi
+      printf '\n%s\n' "$key" >> "$file"
+      chmod 600 "$file"
     expiry_remote: &ssh_key_expiry_remote sh -c %{set_expiry} -- %{input:expiry}
     # Update every occurrence of the selected key in the standard authorized_keys.
     # Preserve other keys, comments, and options (including quoted commas/spaces).
@@ -242,10 +266,11 @@ configuration_scripts:
     prepare_key: &prepare_ssh_key |
       set -eu
       if [ "$1" = 'Generate new Ed25519 key' ]; then
-        private="$HOME/.ssh/id_ed25519"
+        case "$2" in ''|*[!a-zA-Z0-9_.-]*|.*) echo 'Invalid new key filename.' >&2; exit 1 ;; esac
+        private="$HOME/.ssh/$2"
         for file in "$private" "$private.pub"; do
           if [ -e "$file" ] || [ -L "$file" ]; then
-            echo "Cannot generate a new key: $file already exists. Restore the matching key file or select another keypair." >&2
+            echo "Cannot generate a new key: $file already exists. Choose an unused New key filename." >&2
             exit 1
           fi
         done
@@ -268,7 +293,7 @@ configuration_scripts:
       - id: source
         type: promptString
         description: Local directory (absolute or relative to home)
-        default: src/dotfiles
+        default: ~/src/dotfiles
         required: true
       - id: installer
         type: promptString
@@ -287,7 +312,7 @@ configuration_scripts:
       port=$2
       source=$3
       installer=$4
-      case "$source" in /*) ;; *) source="$HOME/$source" ;; esac
+      case "$source" in '~') source=$HOME ;; '~/'*) source="$HOME/${source#\~/}" ;; /*) ;; *) source="$HOME/$source" ;; esac
       test -f "$source/$installer" || { echo "Missing $source/$installer" >&2; exit 1; }
       ssh ${port:+-p "$port"} -- "$host" 'mkdir -p "$HOME/src/dotfiles"'
       scp ${port:+-P "$port"} -r "$source/." "$host:src/dotfiles/"
@@ -551,7 +576,7 @@ configuration_scripts:
       echo 'Daily security-only updates enabled; automatic reboot is disabled.'
   - name: Install Docker / Podman
     command: port=%p; exec ssh ${port:+-p "$port"} -tt -- %h %{remote}
-    remote: sh -c %{elevate} -- %{script} %{input:engine}
+    remote: sh -c %{elevate} -- %{script} %{input:engine} %{input:runsc} %{input:runq} %{input:nvidia}
     elevate: *recipe_elevate
     inputs:
       - id: engine
@@ -559,32 +584,48 @@ configuration_scripts:
         description: Container engine
         options: [Docker, Podman]
         default: Docker
+      - {id: runsc, type: checkbox, description: Install runsc (gVisor; Docker only), default: false}
+      - {id: runq, type: checkbox, description: Install runq (requires KVM; Docker only), default: false}
+      - {id: nvidia, type: checkbox, description: 'Install nvidia-docker (NVIDIA toolkit; Docker only)', default: false}
     script: |
       set -eu
       case "$1" in Docker) engine=docker ;; Podman) engine=podman ;; *) echo 'Invalid container engine.' >&2; exit 1 ;; esac
+      runsc=$2 runq=$3 nvidia=$4
+      for selected in "$runsc" "$runq" "$nvidia"; do
+        case "$selected" in true|false) ;; *) echo 'Invalid runtime checkbox value.' >&2; exit 1 ;; esac
+      done
+      if [ "$engine" != docker ] && [ "$runsc:$runq:$nvidia" != false:false:false ]; then
+        echo 'Optional runtimes require Docker, not Podman.' >&2; exit 1
+      fi
+      if [ "$runq" = true ] && { [ ! -c /dev/kvm ] || [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; }; then
+        echo 'runq requires usable KVM support at /dev/kvm.' >&2; exit 1
+      fi
       . /etc/os-release
+      install_packages() {
+        # Enabled repositories only: never add repositories or build from source.
+        case " $ID ${ID_LIKE:-} " in
+          *' debian '*|*' ubuntu '*) apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" ;;
+          *' fedora '*|*' rhel '*|*' rocky '*) dnf install -y "$@" ;;
+          *' suse '*|*' opensuse-tumbleweed '*) zypper --non-interactive install "$@" ;;
+          *' arch '*) pacman -S --needed --noconfirm "$@" ;;
+          *' alpine '*) apk add "$@" ;;
+          *) echo "Unsupported container package installer for $ID." >&2; exit 1 ;;
+        esac
+      }
       if [ "$engine" = docker ]; then
         test -d /run/systemd/system || command -v rc-service >/dev/null || {
           echo 'Docker requires systemd or OpenRC to manage its daemon.' >&2; exit 1;
         }
       fi
-      case " $ID ${ID_LIKE:-} " in
-        *' debian '*|*' ubuntu '*)
-          package=$engine
-          [ "$engine" != docker ] || package=docker.io
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y "$package" ;;
-        *' fedora '*|*' rhel '*|*' rocky '*)
-          package=$engine
-          [ "$engine" != docker ] || package=moby-engine
-          dnf install -y "$package" ;;
-        *' suse '*|*' opensuse-tumbleweed '*) zypper --non-interactive install "$engine" ;;
-        *' arch '*) pacman -S --needed --noconfirm "$engine" ;;
-        *' alpine '*)
-          apk add "$engine"
-          [ "$engine" != docker ] || apk add docker-openrc ;;
-        *) echo "Unsupported container package installer for $ID." >&2; exit 1 ;;
-      esac
+      package=$engine
+      if [ "$engine" = docker ]; then
+        case " $ID ${ID_LIKE:-} " in
+          *' debian '*|*' ubuntu '*) package=docker.io ;;
+          *' fedora '*|*' rhel '*|*' rocky '*) package=moby-engine ;;
+        esac
+      fi
+      install_packages "$package"
+      if [ "$ID" = alpine ] && [ "$engine" = docker ]; then install_packages docker-openrc; fi
       if [ "$engine" = docker ]; then
         if [ -d /run/systemd/system ]; then
           systemctl enable --now docker
@@ -596,9 +637,48 @@ configuration_scripts:
       else
         podman info
       fi
+      if [ "$runsc:$runq:$nvidia" != false:false:false ]; then
+        set -- jq
+        if [ "$runsc" = true ] && ! command -v runsc >/dev/null; then set -- "$@" runsc; fi
+        if [ "$runq" = true ] && ! command -v runq >/dev/null && [ ! -x /var/lib/runq/runq ]; then set -- "$@" runq; fi
+        if [ "$nvidia" = true ] && ! command -v nvidia-ctk >/dev/null; then set -- "$@" nvidia-container-toolkit; fi
+        if ! install_packages "$@"; then
+          echo 'A selected runtime could not be installed from enabled repositories; no source builds or repositories were added.' >&2
+          exit 1
+        fi
+        mkdir -p /etc/docker
+        config=/etc/docker/daemon.json
+        test ! -L "$config" || { echo 'Refusing symlinked Docker configuration.' >&2; exit 1; }
+        work=$(mktemp -d /etc/docker/.shui-runtimes.XXXXXX)
+        trap 'rm -rf "$work"' 0
+        if [ -e "$config" ]; then cp "$config" "$work/daemon.json"; else echo '{}' > "$work/daemon.json"; fi
+        if [ "$nvidia" = true ]; then
+          nvidia-ctk --version
+          nvidia-ctk runtime configure --runtime=docker --config="$work/daemon.json"
+        fi
+        for runtime in runsc runq; do
+          case "$runtime" in runsc) selected=$runsc ;; runq) selected=$runq ;; esac
+          [ "$selected" = true ] || continue
+          binary=$(command -v "$runtime" || true)
+          if [ -z "$binary" ] && [ "$runtime" = runq ] && [ -x /var/lib/runq/runq ]; then binary=/var/lib/runq/runq; fi
+          test -n "$binary" || { echo "The $runtime package did not provide its executable." >&2; exit 1; }
+          "$binary" --version
+          jq --arg name "$runtime" --arg binary "$binary" '.runtimes[$name].path = $binary' "$work/daemon.json" > "$work/next"
+          mv "$work/next" "$work/daemon.json"
+        done
+        dockerd --validate --config-file "$work/daemon.json"
+        if [ -e "$config" ]; then chmod "$(stat -c %a "$config")" "$work/daemon.json"; else chmod 644 "$work/daemon.json"; fi
+        mv "$work/daemon.json" "$config"
+        if [ -d /run/systemd/system ]; then systemctl reload docker; else rc-service docker reload; fi
+        docker info --format '{{json .Runtimes}}' > "$work/registered"
+        for runtime in runsc runq nvidia; do
+          case "$runtime" in runsc) selected=$runsc ;; runq) selected=$runq ;; nvidia) selected=$nvidia ;; esac
+          [ "$selected" != true ] || jq -e --arg name "$runtime" 'has($name)' "$work/registered" >/dev/null
+        done
+      fi
   - name: Configure log limits and cleanup
     command: port=%p; exec ssh ${port:+-p "$port"} -tt -- %h %{remote}
-    remote: sh -c %{elevate} -- %{bootstrap} %{bootstrap} %{maintenance} %{input:disk} %{input:runtime} %{input:days} %{input:file_size} %{input:backups} %{input:cleanup} %{input:caches} %{input:guests} %{input:depth}
+    remote: sh -c %{elevate} -- %{bootstrap} %{bootstrap} %{maintenance} %{input:disk} %{input:runtime} %{input:days} %{input:file_size} %{input:backups} %{input:cleanup} %{input:all_archives} %{input:package_caches} %{input:user_caches} %{input:all_users} %{input:guests} %{input:depth}
     elevate: *recipe_elevate
     inputs:
       - {id: disk, type: promptString, description: 'Disk journal cap (bytes or K/M/G/T; e.g. 512M)', default: 512M, required: true, pattern: &log_size_pattern '[1-9][0-9]*[KMGT]?', validation_message: &log_size_hint 'Use positive bytes or an uppercase K/M/G/T suffix, e.g. 512M'}
@@ -606,21 +686,12 @@ configuration_scripts:
       - {id: days, type: promptString, description: Retention in days (1-36500), default: '30', required: true, pattern: '(?:[1-9][0-9]{0,3}|[12][0-9]{4}|3[0-5][0-9]{3}|36[0-4][0-9]{2}|36500)', validation_message: Enter whole days from 1 to 36500}
       - {id: file_size, type: promptString, description: 'Per-log cap (bytes or K/M/G/T; e.g. 10M)', default: 10M, required: true, pattern: *log_size_pattern, validation_message: *log_size_hint}
       - {id: backups, type: promptString, description: Rotated files per log (1-100), default: '3', required: true, pattern: '(?:[1-9][0-9]?|100)', validation_message: Enter a whole number from 1 to 100}
-      - id: cleanup
-        type: pickString
-        description: Cleanup mode
-        options: [Enforce retention, Remove all archives and selected caches]
-        default: Enforce retention
-      - id: caches
-        type: pickString
-        description: Cache cleanup
-        options: [None, Package caches, Login-user caches, All-user caches, Package and login-user caches, Package and all-user caches]
-        default: None
-      - id: guests
-        type: pickString
-        description: VM guest scope
-        options: [Host only, Running guests recursively]
-        default: Host only
+      - {id: cleanup, type: checkbox, description: Clean expired/excess rotated logs (active logs kept), default: true}
+      - {id: all_archives, type: checkbox, description: 'Delete ALL rotated logs and selected caches now (ignore age)', default: false}
+      - {id: package_caches, type: checkbox, description: Clean package caches, default: false}
+      - {id: user_caches, type: checkbox, description: Clean login-user ~/.cache (respect retention), default: false}
+      - {id: all_users, type: checkbox, description: Include all local users (requires user cache cleanup), default: false}
+      - {id: guests, type: checkbox, description: Also clean running VM guests recursively, default: false}
       - {id: depth, type: promptString, description: Guest depth (0-5; 0 disables traversal), default: '2', required: true, pattern: '[0-5]', validation_message: Enter one digit from 0 to 5}
     bootstrap: |
       set -eu
@@ -645,10 +716,11 @@ configuration_scripts:
       bootstrap=$1
       source=$2
       shift 2
-      options=("${@:1:9}")
-      disk=$1 runtime=$2 days=$3 file_size=$4 backups=$5 cleanup=$6 caches=$7 guests=$8 depth=$9
+      options=("${@:1:12}")
+      disk=$1 runtime=$2 days=$3 file_size=$4 backups=$5 cleanup_logs=$6 all_archives=$7 package_caches=$8 user_caches=$9
+      all_users=${10} guests=${11} depth=${12}
       context='{"seen":[],"remaining":16}'
-      if (( $# > 9 )); then context=${10}; fi
+      if (( $# > 12 )); then context=${13}; fi
       fail() { printf '%s\n' "$*" >&2; exit 1; }
       bytes() {
         [[ $1 =~ ^([1-9][0-9]*)([KMGT]?)$ ]] || fail 'Use positive bytes or a K/M/G/T suffix'
@@ -663,9 +735,23 @@ configuration_scripts:
       [[ $days =~ ^[1-9][0-9]{0,4}$ ]] && (( days <= 36500 )) || fail 'Days must be 1-36500'
       [[ $backups =~ ^[1-9][0-9]{0,2}$ ]] && (( backups <= 100 )) || fail 'Backups must be 1-100'
       [[ $depth =~ ^[0-5]$ ]] || fail 'Guest depth must be 0-5'
-      case "$cleanup" in 'Enforce retention') aggressive=0 ;; 'Remove all archives and selected caches') aggressive=1 ;; *) fail 'Invalid cleanup mode' ;; esac
-      case "$caches" in None|'Package caches'|'Login-user caches'|'All-user caches'|'Package and login-user caches'|'Package and all-user caches') ;; *) fail 'Invalid cache scope' ;; esac
-      case "$guests" in 'Host only'|'Running guests recursively') ;; *) fail 'Invalid guest scope' ;; esac
+      for selected in "$cleanup_logs" "$all_archives" "$package_caches" "$user_caches" "$all_users" "$guests"; do
+        case "$selected" in true|false) ;; *) fail 'Invalid cleanup checkbox value' ;; esac
+      done
+      [[ $all_archives != true || $cleanup_logs == true ]] || fail 'Deleting all archives requires rotated-log cleanup'
+      [[ $all_users != true || $user_caches == true ]] || fail 'All-user scope requires user cache cleanup'
+      aggressive=0
+      [[ $all_archives != true ]] || aggressive=1
+      caches=None
+      if [[ $package_caches == true ]]; then caches='Package caches'; fi
+      if [[ $user_caches == true ]]; then
+        caches='Login-user caches'
+        [[ $all_users != true ]] || caches='All-user caches'
+        if [[ $package_caches == true ]]; then
+          caches='Package and login-user caches'
+          [[ $all_users != true ]] || caches='Package and all-user caches'
+        fi
+      fi
       umask 077
       work=$(mktemp -d)
       trap 'rm -rf -- "$work"' EXIT
@@ -782,6 +868,7 @@ configuration_scripts:
         else echo 'WARNING: virtlogd limits take effect when it next starts'; fi
       }
       archives() {
+        [[ $cleanup_logs == true ]] || return 0
         # GNU find -execdir holds the containing directory open. Delete only
         # basenames from that directory, never through user-controlled parents.
         archive_cleanup=$(cat <<'SH'
@@ -854,11 +941,11 @@ configuration_scripts:
         done < "$work/users"
       }
       guest_logs() {
-        [[ $guests != 'Host only' && $depth != 0 ]] || return 0
+        [[ $guests == true && $depth != 0 ]] || return 0
         if ! command -v virsh >/dev/null; then echo 'No libvirt client; skipping guest traversal'; return; fi
         virsh -c qemu:///system list --state-running --uuid > "$work/domains"
         child=("${options[@]}")
-        child[8]=$((depth - 1))
+        child[11]=$((depth - 1))
         uncertain_guest() {
           # Unknown child progress must not let ancestors reuse its guest budget.
           jq '.remaining = 0' "$work/context" > "$work/next"
@@ -945,10 +1032,10 @@ configuration_scripts:
         validation_message: 'Use IPs/CIDRs separated by spaces or commas, e.g. 192.0.2.1 2001:db8::/64; blank allows any'
       - id: ports
         type: promptString
-        description: Extra ports (80/tcp 53/udp 8000-8010/tcp; space/comma)
+        description: Port whitelist (80/tcp 53/udp 8000-8010/tcp; no SSH)
         default: ''
         pattern: '[ ]*(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])(?:-(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?/(?:tcp|udp)(?:[ ,]+(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])(?:-(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?/(?:tcp|udp))*[ ]*'
-        validation_message: 'Use port/tcp or port/udp (1-65535), optionally a range; separate entries with spaces or commas, or leave blank'
+        validation_message: 'Whitelist port/tcp or port/udp (1-65535); spaces/commas separate entries. SSH and ranges containing it are rejected'
     script: |
       set -eu
       . /etc/os-release
@@ -958,10 +1045,10 @@ configuration_scripts:
           backend=ufw
           if systemctl is-active --quiet firewalld; then echo 'firewalld is already active; refusing to enable UFW alongside it.' >&2; exit 1; fi
           apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y ufw jq iproute2 ;;
-        *' fedora '*|*' rhel '*|*' rocky '*) backend=firewalld; dnf install -y firewalld jq iproute ;;
-        *' suse '*|*' opensuse-tumbleweed '*) backend=firewalld; zypper --non-interactive install firewalld jq iproute2 ;;
-        *' arch '*) backend=firewalld; pacman -S --needed --noconfirm firewalld jq iproute2 ;;
+          DEBIAN_FRONTEND=noninteractive apt-get install -y ufw iproute2 ;;
+        *' fedora '*|*' rhel '*|*' rocky '*) backend=firewalld; dnf install -y firewalld iproute ;;
+        *' suse '*|*' opensuse-tumbleweed '*) backend=firewalld; zypper --non-interactive install firewalld iproute2 ;;
+        *' arch '*) backend=firewalld; pacman -S --needed --noconfirm firewalld iproute2 ;;
         *) echo "Unsupported firewall installer for $ID." >&2; exit 1 ;;
       esac
       exec sh -c "$1" -- "$backend" "$2" "$3" "$4"
@@ -992,8 +1079,8 @@ configuration_scripts:
         case "$protocol" in tcp|udp) ;; *) fail 'Ports require /tcp or /udp' ;; esac
         start=${range%-*} end=${range#*-}
         port_number "$start" && port_number "$end" && [ "$start" -le "$end" ] || fail 'Port range must be within 1-65535'
-        if [ "$protocol" = tcp ] && [ "$start" -le "$ssh" ] && [ "$ssh" -le "$end" ]; then
-          fail 'Configure SSH access with SSH allowed IPs, not additional ports'
+        if [ "$start" -le "$ssh" ] && [ "$ssh" -le "$end" ]; then
+          fail 'Configure SSH access with SSH allowed IPs, not the port whitelist'
         fi
       done
       umask 077
@@ -1001,21 +1088,10 @@ configuration_scripts:
       trap 'rm -rf -- "$work"' 0
       if [ "$backend" = ufw ]; then
         [ ! -L /etc/default/ufw ] || fail 'Refusing symlinked UFW configuration'
+        # The whitelist replaces prior UFW rules, rather than adding exceptions.
+        ufw --force reset
         sed -i 's/^IPV6=.*/IPV6=yes/' /etc/default/ufw
         grep -q '^IPV6=yes$' /etc/default/ufw || printf '\nIPV6=yes\n' >> /etc/default/ufw
-        ufw show added > "$work/added"
-        # Managed rules contain only numeric sources/ports and this fixed comment.
-        # Split words as arguments, never eval firewall output as shell code.
-        while IFS= read -r line; do
-          case "$line" in
-            *" comment 'shui-ssh'"|*" comment shui-ssh")
-              line=${line% comment *}
-              set -- $line
-              [ "$1" = ufw ] || continue
-              shift
-              ufw --force delete "$@" comment shui-ssh ;;
-          esac
-        done < "$work/added"
         if [ -n "$sources" ]; then
           ufw prepend deny in proto tcp to any port "$ssh" comment shui-ssh
         fi
@@ -1034,27 +1110,30 @@ configuration_scripts:
         ufw status verbose
       else
         if systemctl is-active --quiet ufw; then fail 'UFW is active; refusing to enable firewalld alongside it'; fi
-        state=/var/lib/shui/firewall-ssh.json
-        [ ! -L "$state" ] || fail 'Refusing symlinked firewall state'
-        if [ -e "$state" ]; then cp "$state" "$work/state"; else echo '{}' > "$work/state"; fi
-        jq -e 'type == "object" and all(.[]; type == "array" and all(.[]; type == "string"))' "$work/state" >/dev/null
         systemctl enable --now firewalld
         default=$(firewall-cmd --get-default-zone)
         active=$(firewall-cmd --get-active-zones)
         { printf '%s\n' "$default"; printf '%s\n' "$active" | awk 'NF && !/^[[:space:]]/ {print $1}'; } | sort -u > "$work/zones"
         while IFS= read -r zone; do
-          jq -r --arg zone "$zone" '.[$zone][]?' "$work/state" > "$work/previous"
+          # Replace existing allowances so omitted ports really are blocked.
+          for kind in services ports protocols source-ports forward-ports; do
+            entries=$(firewall-cmd --permanent --zone="$zone" --list-"$kind")
+            case "$kind" in
+              services) option=service ;;
+              ports) option=port ;;
+              protocols) option=protocol ;;
+              source-ports) option='source-port' ;;
+              forward-ports) option='forward-port' ;;
+            esac
+            for entry in $entries; do firewall-cmd --permanent --zone="$zone" --remove-"$option"="$entry"; done
+          done
+          firewall-cmd --permanent --zone="$zone" --list-rich-rules > "$work/previous"
           while IFS= read -r rule; do
-            if firewall-cmd --permanent --zone="$zone" --query-rich-rule="$rule" >/dev/null; then
-              firewall-cmd --permanent --zone="$zone" --remove-rich-rule="$rule"
-            fi
+            [ -n "$rule" ] || continue
+            firewall-cmd --permanent --zone="$zone" --remove-rich-rule="$rule"
           done < "$work/previous"
-          jq --arg zone "$zone" '.[$zone] = []' "$work/state" > "$work/next"
-          mv "$work/next" "$work/state"
           add_rule() {
             firewall-cmd --permanent --zone="$zone" --add-rich-rule="$1"
-            jq --arg zone "$zone" --arg rule "$1" '.[$zone] += [$rule]' "$work/state" > "$work/next"
-            mv "$work/next" "$work/state"
           }
           for family in ipv4 ipv6; do
             for source in ${sources:-any}; do
@@ -1070,8 +1149,6 @@ configuration_scripts:
           for entry in $ports; do firewall-cmd --permanent --zone="$zone" --add-port="$entry"; done
           firewall-cmd --permanent --zone="$zone" --set-target=default
         done < "$work/zones"
-        mkdir -p /var/lib/shui
-        cp "$work/state" "$state"
         firewall-cmd --reload
         while IFS= read -r zone; do firewall-cmd --zone="$zone" --list-all; done < "$work/zones"
       fi

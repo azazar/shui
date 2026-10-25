@@ -121,6 +121,40 @@ def containers():
         == "engine-works"
     )
     CASES.append({"case": "container-engines-execute-processes", "status": "passed"})
+    # Exercise runtime registration/reload without requiring a gVisor package in
+    # distro repositories. This forwarding fixture tests wiring, not sandboxing.
+    runtime = Path("/usr/local/bin/runsc")
+    assert not runtime.exists(), "must not replace an installed runtime"
+    runc = shutil.which("runc")
+    assert runc
+    runtime.write_text(f'#!/bin/sh\nexec {runc} "$@"\n')
+    runtime.chmod(0o755)
+    config = Path("/etc/docker/daemon.json")
+    original = json.loads(config.read_text()) if config.exists() else {}
+    original["labels"] = ["shui-runtime-preserved=true"]
+    config.parent.mkdir(exist_ok=True)
+    config.write_text(json.dumps(original))
+    script("containers-runsc", timeout=900)
+    updated = json.loads(config.read_text())
+    assert updated["labels"] == original["labels"]
+    assert Path(updated["runtimes"]["runsc"]["path"]).resolve() == runtime.resolve()
+    assert (
+        run(
+            "docker",
+            "run",
+            "--runtime=runsc",
+            "--rm",
+            "--network=none",
+            "shui-fixture",
+            "/bin/sh",
+            "-c",
+            "echo runtime-works",
+        )
+        == "runtime-works"
+    )
+    CASES.append(
+        {"case": "docker-runtime-registration-and-reload-fixture", "status": "passed"}
+    )
 
 
 def updates():
@@ -247,6 +281,10 @@ def log_cleanup():
     configuration["labels"] = ["shui-preserve=true"]
     docker_config.parent.mkdir(exist_ok=True)
     docker_config.write_text(json.dumps(configuration))
+    script("logs-no-archives")
+    assert archive.exists() and old.exists(), (
+        "unchecked cleanup options must preserve logs/caches"
+    )
     script("logs-retention")
     assert not old.exists() and recent.exists()
     assert not archive.exists() and latest.exists()
@@ -324,9 +362,15 @@ time.sleep(600)
             "firewall-invalid-ip",
             "firewall-invalid-port",
             "firewall-ssh-bypass",
+            "firewall-ssh-udp",
         ):
             script(fixture, expected=1)
             assert probe(2222) and probe(8081)
+        if shutil.which("ufw"):
+            run("ufw", "allow", "8081/tcp")
+        else:
+            run("systemctl", "start", "firewalld")
+            run("firewall-cmd", "--permanent", "--add-port=8081/tcp")
         script("firewall-restricted")
         for source in ("192.0.2.2", "2001:db8::2"):
             assert probe(2222, source), source
@@ -338,12 +382,15 @@ time.sleep(600)
         assert not probe(2222, "2001:db8::3")
         script("firewall-changed")
         assert probe(2222, "192.0.2.3")
+        assert not probe(5353, "192.0.2.3", udp=True), (
+            "ports omitted from replacement whitelist must close"
+        )
         assert not probe(2222, "192.0.2.2")
         assert not probe(2222, "2001:db8::2")
-        # Blank SSH sources restores access; previously allowed ports stay allowed.
+        # Blank SSH sources restores SSH access; an empty whitelist closes other ports.
         script("firewall")
         assert probe(2222, "192.0.2.2") and probe(2222, "2001:db8::3")
-        assert probe(8080) and not probe(8081)
+        assert not probe(8080) and not probe(8081)
         CASES.append(
             {
                 "case": "firewall-enforces-ipv4-ipv6-tcp-udp-and-edits",

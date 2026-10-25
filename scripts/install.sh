@@ -3,7 +3,7 @@
 # Keep the entry point last so a truncated download cannot start installation.
 install_shui() (
   set -eu
-  version=v0.1.0-rc.11
+  version=v0.1.0-rc.12
   case "$(uname -s):$(uname -m)" in
     Linux:x86_64) target=x86_64-unknown-linux-musl ;;
     Linux:aarch64|Linux:arm64) target=aarch64-unknown-linux-musl ;;

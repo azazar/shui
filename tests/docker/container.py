@@ -239,11 +239,41 @@ def run():
         script("auth-existing", "auth")
         authorized = remote('cat "$HOME/.ssh/authorized_keys"').stdout.splitlines()
         public = Path("/root/.ssh/id_ed25519.pub").read_text().strip()
-        assert authorized.count(public) == 1, "ssh-copy-id duplicated the key"
+        assert authorized.count(public) == 1, "key setup duplicated the key"
         # The recipe must protect an already existing keypair.
         before = Path("/root/.ssh/id_ed25519").read_bytes()
         script("auth-no-overwrite", "auth-generate", expected=1)
         assert Path("/root/.ssh/id_ed25519").read_bytes() == before
+        script("auth-generate-second")
+        assert Path("/root/.ssh/id_second").exists()
+        assert Path("/root/.ssh/id_ed25519").read_bytes() == before
+        second_public = Path("/root/.ssh/id_second.pub").read_text().strip()
+        assert second_public in remote('cat "$HOME/.ssh/authorized_keys"').stdout
+        # Ignore all configured identities: prove the second key itself works.
+        second_login = subprocess.run(
+            [
+                "ssh",
+                "-F",
+                "/dev/null",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "IdentitiesOnly=yes",
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "UserKnownHostsFile=/dev/null",
+                "-i",
+                "/root/.ssh/id_second",
+                "-p",
+                "2222",
+                "remote@127.0.0.1",
+                "true",
+            ],
+            capture_output=True,
+            timeout=20,
+        )
+        assert second_login.returncode == 0, second_login.stderr
 
         for choice, seconds in [
             ("8-hours", 28800),

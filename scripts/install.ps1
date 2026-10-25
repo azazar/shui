@@ -1,6 +1,6 @@
 & {
     $ErrorActionPreference = "Stop"
-    $version = "v0.1.0-rc.11"
+    $version = "v0.1.0-rc.12"
     $target = switch ($env:PROCESSOR_ARCHITECTURE) {
         "AMD64" { "x86_64-pc-windows-msvc" }
         "ARM64" { "aarch64-pc-windows-msvc" }

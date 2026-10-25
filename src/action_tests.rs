@@ -628,6 +628,60 @@ configuration_scripts:
 }
 
 #[test]
+fn checkbox_inputs_toggle_independently_and_preserve_recipe_drafts() {
+    let config = launch::Config::parse(
+        r#"
+default: Options
+profiles:
+  - name: Options
+    command: 'launch %{input:first} %{input:second}'
+    inputs: &options
+      - {id: first, type: checkbox, description: First option, default: true}
+      - {id: second, type: checkbox, description: Second option, default: false}
+configuration_scripts:
+  - name: Setup
+    command: 'setup %{input:first} %{input:second}'
+    inputs: *options
+"#,
+    )
+    .unwrap();
+    let mut session = Session::new(
+        [
+            "Space",
+            "Down",
+            "Space",
+            "Down",
+            "Space",
+            "Up",
+            "Space",
+            "Shift+Tab",
+            "Space",
+            "Space",
+            "Enter",
+        ]
+        .map(key),
+    );
+    let selection = new_remote::dialog(&mut session, &config, Some(&host()), None)
+        .unwrap()
+        .unwrap();
+    session.done();
+    session.saw("Toggle");
+    assert_eq!(
+        command_args(selection.setup_command.unwrap()),
+        ["setup", "true", "true"]
+    );
+    let mut session = Session::new(["Space", "Down", "Space", "x", "Enter"].map(key));
+    let selection = new_remote::connect(&mut session, &config, &host(), 0, false)
+        .unwrap()
+        .unwrap();
+    session.done();
+    assert_eq!(
+        command_args(selection.connection_command.unwrap()),
+        ["launch", "false", "true"]
+    );
+}
+
+#[test]
 fn pattern_errors_keep_dialogs_open_and_focus_the_invalid_input() {
     let config = launch::Config::parse(r#"
 default: Input

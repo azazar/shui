@@ -226,14 +226,7 @@ impl Dialog {
                 input.label(),
                 if input.required { " *" } else { "" }
             );
-            fields.push((
-                label,
-                if input.kind == launch::InputType::PickString && input.options.len() > 1 {
-                    format!("← {value} →")
-                } else {
-                    value.to_owned()
-                },
-            ));
+            fields.push((label, input.display_value(value)));
         }
         if let Some(setup_fields) = &self.setup_fields {
             fields = setup_fields.clone();
@@ -303,13 +296,23 @@ impl Dialog {
         let can_edit = (focus == remote_field && !fixed_remote)
             || input.is_some_and(|input| input.kind == launch::InputType::PromptString);
         let mut items = vec![
-            bar::Item::action(keys, "dialog", "toggle_recipe", "Queue", 2).available(
-                if self.setup_fields.is_some() {
-                    self.setup_checkbox
+            bar::Item::action(
+                keys,
+                "dialog",
+                "toggle_recipe",
+                if input.is_some_and(|i| i.kind == launch::InputType::Checkbox) {
+                    "Toggle"
                 } else {
-                    !connecting && focus == remote_field + 1
+                    "Queue"
                 },
-            ),
+                2,
+            )
+            .available(if self.setup_fields.is_some() {
+                self.setup_checkbox
+            } else {
+                (!connecting && focus == remote_field + 1)
+                    || input.is_some_and(|i| i.kind == launch::InputType::Checkbox)
+            }),
             bar::Item::pair(keys, "dialog", "previous_field", "next_field", "Field", 3),
             bar::Item::pair(keys, "dialog", "left", "right", "Choice", 4).available(can_choose),
             bar::Item::action(
@@ -424,11 +427,7 @@ fn setup_form(
                             input.label(),
                             if input.required { " *" } else { "" }
                         ),
-                        if input.kind == launch::InputType::PickString && input.options.len() > 1 {
-                            format!("← {value} →")
-                        } else {
-                            value
-                        },
+                        input.display_value(&value),
                     ));
                 }
             }
@@ -436,7 +435,8 @@ fn setup_form(
         let position = rows.iter().position(|r| *r == focus).unwrap_or(1);
         focus = rows[position];
         dialog.setup_fields = Some(fields);
-        dialog.setup_checkbox = matches!(focus, SetupRow::Recipe(_));
+        dialog.setup_checkbox = matches!(focus, SetupRow::Recipe(_))
+            || matches!(focus, SetupRow::Input(i, j) if recipes[i].inputs[j].kind == launch::InputType::Checkbox);
         dialog.setup_input = match focus {
             SetupRow::Input(i, j) => Some(recipes[i].inputs[j].clone()),
             _ => None,
@@ -496,6 +496,13 @@ fn setup_form(
                 focus = rows[(position + rows.len() - 1) % rows.len()]
             }
             KeyCode::F(6) => {
+                if let SetupRow::Input(i, j) = focus
+                    && recipes[i].inputs[j].kind == launch::InputType::Checkbox
+                {
+                    let value = values[i].get_mut(&recipes[i].inputs[j].id).unwrap();
+                    *value = (value != "true").to_string();
+                    error.clear();
+                }
                 if let SetupRow::Recipe(i) = focus {
                     checked[i] = !checked[i];
                     error.clear();
@@ -771,10 +778,14 @@ fn form(
             continue;
         }
         let repeated = key.kind == KeyEventKind::Repeat;
-        let Some(key) = config
-            .keybindings
-            .translate_dialog(key, !connecting && focus == recipe_field)
-        else {
+        let Some(key) = config.keybindings.translate_dialog(
+            key,
+            (!connecting && focus == recipe_field)
+                || focus
+                    .checked_sub(input_start)
+                    .and_then(|i| inputs.get(i))
+                    .is_some_and(|input| input.kind == launch::InputType::Checkbox),
+        ) else {
             continue;
         };
         if repeated
@@ -796,6 +807,16 @@ fn form(
             continue;
         }
         match key.code {
+            KeyCode::F(6)
+                if focus >= input_start
+                    && inputs[focus - input_start].kind == launch::InputType::Checkbox =>
+            {
+                let value = values[setup - 1]
+                    .get_mut(&inputs[focus - input_start].id)
+                    .unwrap();
+                *value = (value != "true").to_string();
+                error.clear();
+            }
             KeyCode::F(6) if !connecting && focus == recipe_field => {
                 if !repeated {
                     queue_mode = true;

@@ -11,6 +11,8 @@ Each action retains its own address draft while you switch. Tab/Shift-Tab or Up/
 
 All available recipes appear as checkbox rows in one scrollable form. Use Up/Down or Tab/Shift-Tab to navigate, and **Space** to check or uncheck a recipe. Every checked recipe's options appear directly beneath its checkbox, so options for multiple selected recipes stay visible together. Unchecked recipes hide their options but retain edited values. Enter validates all checked recipes before running them in configuration order, stopping at the first failure. Only checked recipes run; an empty selection skips setup in Add new mode.
 
+After each recipe finishes, Shui shows its exit status and waits for **Enter** locally so you can read the output. This pause also applies to failures, before returning to the menu or reporting the error. It does not change the recipe's success/failure result.
+
 ![Configuring the selected host with a setup recipe](images/configure-remote.png)
 
 ![Adding a remote with SSH keypair and dotfiles inputs](images/new-remote.png)
@@ -19,7 +21,7 @@ The included setup recipes are:
 
 | Recipe | What it does |
 | --- | --- |
-| **Configure key-based auth** | Selects an existing keypair or offers generation when none is available, then copies its public key with ssh-copy-id |
+| **Configure key-based auth** | Selects an existing keypair or generates a new one, then installs its public key over SSH |
 | **Install dotfiles** | Uses the configured SSH authentication to upload a dotfiles directory and run its installer |
 | **Configure passwordless sudo** | Writes `/etc/sudoers.d/nopasswd` for the distro's administrative group (`sudo` on Debian/Ubuntu, `wheel` on the other supported distros) |
 | **Configure SSH-agent sudo** | Installs the needed PAM module and authorizes the forwarded agent's public keys |
@@ -29,9 +31,11 @@ The included setup recipes are:
 | **Configure firewall** | Configures the distro firewall with optional SSH source restrictions and additional allowed ports |
 | **Copy terminal definition** | Exports local `$TERM` and compiles it into remote `~/.terminfo` for terminals unknown to the server |
 
-The dotfiles sample defaults to local `~/src/dotfiles`, installer `install.sh`, and shell `sh`. Change the dialog values or edit the recipe for your own repository. Selecting `bash` installs it remotely if missing, using root or sudo. Dependencies of your own installer remain its responsibility. The recipe uses normal SSH configuration and authentication; configure access first if needed. The key-auth recipe remains available when no matching `~/.ssh/id_*` private/public keypairs exist. The key selector reads filenames, not key contents. If no usable pair is found, it offers **Generate new Ed25519 key** instead.
+The dotfiles source defaults to `~/src/dotfiles`; `~` expands to the local home directory on Unix and the user profile on Windows. Relative sources are also resolved under that home. The installer defaults to `install.sh`, using `sh`; selecting `bash` installs it remotely if missing. Dependencies of your own installer remain its responsibility. The recipe uses normal SSH authentication; configure access first if needed. The SSH key selector always offers **Generate new Ed25519 key**, alongside every matching existing pair. It reads filenames, not key contents.
 
-Generation runs only after confirming setup, never while opening or canceling the dialog. It uses `ssh-keygen` to create the standard `~/.ssh/id_ed25519` pair, with the terminal restored for its passphrase prompts. No empty passphrase is forced. Existing private or public files (including symlinks) are not overwritten; restore an incomplete pair or choose another existing pair before retrying. Failure stops setup before `ssh-copy-id` or the connection runs. The generated key remains on disk if later setup fails.
+Generation runs only after confirming setup, never while opening or canceling the dialog. **New key filename** chooses a filename inside local `~/.ssh` (default `id_ed25519`); choose an unused name when a pair already exists. `ssh-keygen` asks for its passphrase on the restored terminal. No empty passphrase is forced. Existing private or public files (including symlinks) are never overwritten. Failure stops setup before copying the key or connecting; a newly generated key remains if later setup fails.
+
+The installer checks key identity before appending, so an already installed key is not duplicated and existing restrictions are preserved. Authentication with another existing key does not make it skip a new key. Unix remotes use `ssh-keygen` fingerprints from their OpenSSH installation.
 
 The key-auth recipe offers **Key expiry**: never (default), 8 hours, day, week, month, or year. After copying the key, setup applies OpenSSH's [`expiry-time`](https://man.openbsd.org/sshd.8#expiry-time) option using the server's clock and UTC. Month means 30 days; year means 365 days. **Never** removes an existing expiry for that key. Every matching entry is updated, preserving other restrictions, comments, and unrelated keys. Expiry blocks new authentication; it does not disconnect existing sessions.
 
@@ -77,6 +81,8 @@ The recipe writes `shui-security-updates.service` and `.timer` under `/etc/syste
 
 Docker is enabled and started through systemd or Alpine's OpenRC, then verified with `docker info`. Podman is daemonless and is verified with `podman info`. The recipe does not add users to groups, configure rootless Podman, or run a full-system upgrade. On repositories without Docker/Moby, choose Podman or enable an appropriate repository yourself.
 
+Independent, initially unchecked Docker-only options install **runsc (gVisor)**, **runq**, and **NVIDIA Container Toolkit** (`nvidia-docker`). Selected runtimes are registered without changing Docker's default runtime or recreating containers; its configuration is validated and reloaded. Only packages from enabled repositories are used—no source builds or repository additions. Unavailable packages cause a clear failure (earlier installation steps are not rolled back). runq requires usable `/dev/kvm`; NVIDIA requires a separately working host GPU driver. These options are rejected when Podman is selected.
+
 ## Log limits and cleanup
 
 **Configure log limits and cleanup** uses a Bash script and native logging/filesystem tools on the host and optional running libvirt guests. Missing Bash, jq, logrotate, coreutils and GNU findutils are installed from distro repositories. No embedded Python is used; jq handles Docker configuration and QEMU-agent JSON safely.
@@ -89,9 +95,12 @@ Inputs:
 | Retention days | 30 | Journal/archive retention and user-cache age threshold |
 | Individual log size | 10M | Logrotate default, Docker/Podman defaults and virtlogd log size |
 | Rotated files per log | 3 | Logrotate/Docker/virtlogd backup count |
-| Cleanup mode | Enforce retention | Remove expired/excess archives and old selected user-cache files, or **Remove all archives and selected caches** to reclaim more space |
-| Cache cleanup | None | Package caches, login-user/all-user caches, or both package and selected user caches |
-| VM guest scope | Host only | Optionally traverse running guests recursively through QEMU guest-agent execution |
+| Clean expired/excess rotated logs | Checked | Remove only rotated text/VM archives exceeding retention days or backup count; never delete active logs |
+| Delete ALL rotated logs and selected caches now | Unchecked | Explicitly ignore age for rotated logs, selected caches and archived journals; requires log cleanup to be checked |
+| Clean package caches | Unchecked | Use the package manager's native cache-cleaning behavior |
+| Clean login-user ~/.cache | Unchecked | Remove old files unless immediate deletion is explicitly selected |
+| Include all local users | Unchecked | Extend user-cache cleanup beyond the login user; requires user-cache cleanup |
+| Also clean running VM guests recursively | Unchecked | Apply the same selected options through QEMU guest-agent execution |
 | Maximum guest depth | 2 | 0–5; traversal also has a total budget of 16 guest attempts |
 
 Sizes accept positive bytes or `K`, `M`, `G`, `T` suffixes. The recipe configures:
@@ -110,18 +119,22 @@ Recursive mode uses the system libvirt connection and requires working guest age
 
 ## Firewall
 
-**Configure firewall** uses a POSIX shell script and installs UFW on Debian/Ubuntu or firewalld on Fedora/RHEL derivatives, openSUSE and Arch, plus jq and iproute2 (named `iproute` on Fedora/RHEL). It requires systemd. iproute2 validates numeric addresses/prefixes without changing routes; jq preserves managed-rule JSON state. Only necessary packages are installed, without a full-system upgrade. Existing allowed services remain; incoming traffic is default-deny, while outgoing traffic, established connections and standard loopback/ICMP handling remain available.
+**Configure firewall** uses a POSIX shell script and installs UFW on Debian/Ubuntu or firewalld on Fedora/RHEL derivatives, openSUSE and Arch, plus iproute2 (named `iproute` on Fedora/RHEL). It requires systemd. Numeric addresses/prefixes are validated without changing routes. Only necessary packages are installed, without a full-system upgrade.
+
+**The port whitelist replaces existing allowances, rather than adding ports.** UFW rules are reset. Firewalld replaces services, ports, protocols, source-port/forward-port allowances and rich rules in its default and active zones. Incoming traffic not whitelisted is rejected, apart from the separately configured SSH access and standard loopback/established/ICMP handling. Review this before applying it to a host with custom firewall rules.
 
 - **SSH allowed IPs/CIDRs**: comma- or whitespace-separated IPv4/IPv6 addresses or networks. Blank allows SSH from any address. The server-side port is obtained from the current SSH connection, including nonstandard ports and SSH aliases.
-- **Additional ports**: comma- or whitespace-separated entries such as `80/tcp 443/tcp 53/udp 8000-8010/tcp`. The SSH port must be configured through the SSH source field, not this list.
+- **Port whitelist**: comma- or whitespace-separated entries such as `80/tcp 443/tcp 53/udp 8000-8010/tcp`. Blank permits no additional incoming ports. The SSH port, including a range covering it, is rejected; configure SSH through its separate source field.
 
-SSH rules precede ordinary service allowances. UFW marks managed SSH rules with `shui-ssh`; firewalld uses rich-rule priorities -100/-90 and tracks its rules in `/var/lib/shui/firewall-ssh.json`. Firewalld configures the default and currently active zones, then reloads permanent configuration. Existing custom higher-priority rules or policies may still take precedence. Re-running replaces the recipe's SSH source rules; additional port allowances are additive. An already active alternative firewall is rejected rather than enabling both backends.
+UFW labels SSH rules `shui-ssh`; firewalld uses rich-rule priorities -100/-90. Re-running replaces the whitelist and SSH restrictions. Custom firewalld policies or direct rules outside these zones can still take precedence and need separate review. An already active alternative firewall is rejected rather than enabling both backends.
 
 ## Custom inputs
 
 Recipes belong under top-level `configuration_scripts` and share the profile command format. Commented examples are in the shipped config; F9 opens your copy.
 
 `promptString` creates a text field; `pickString` creates a dropdown. IDs are unique within a recipe and contain letters, digits, `_`, or `-`. `description` supplies the label, otherwise the ID is shown. Text fields default to empty; dropdowns default to their first option. The `required` flag rejects blank values.
+
+Use `type: checkbox` for independent yes/no options, especially when multiple options may be selected. **Space** toggles the focused checkbox. `default: true` checks it initially; omitted defaults are false. Templates receive the literal string `true` or `false`. Checkboxes work in setup recipes and launch-profile input dialogs and retain their values while navigating. For example: `{id: guests, type: checkbox, description: Clean VM guests, default: false}`. Keep mutually exclusive choices as dropdowns.
 
 An optional `pattern` is a [Rust regular expression](https://docs.rs/regex/latest/regex/#syntax) matched against the **entire** value. Optional empty fields skip the pattern. Use `validation_message` to explain the accepted format when validation fails:
 
@@ -135,7 +148,7 @@ An optional `pattern` is a [Rust regular expression](https://docs.rs/regex/lates
   validation_message: Enter a whole number from 1 to 100
 ```
 
-Invalid patterns or nonempty defaults/options that do not match are configuration errors. Generated defaults/options must also satisfy the static pattern. Submission focuses the first invalid field and validates all selected recipes before any command runs. Bundled log-size fields accept positive byte counts or uppercase `K/M/G/T` suffixes (for example `512M`, not `512MB`). Firewall lists use spaces or commas; extra ports require `/tcp` or `/udp`. CIDR validity, port-range ordering and SSH-port conflicts are additionally checked on the remote host before firewall changes.
+Invalid patterns or nonempty defaults/options that do not match are configuration errors. Generated defaults/options must also satisfy the static pattern. Submission focuses the first invalid field and validates all selected recipes before any command runs. Bundled log-size fields accept positive byte counts or uppercase `K/M/G/T` suffixes (for example `512M`, not `512MB`). Firewall whitelist entries use `/tcp` or `/udp`, separated by spaces or commas. CIDR validity, port-range ordering and SSH-port conflicts are additionally checked remotely before firewall changes.
 
 Pass remote-script inputs as positional arguments, as shown in the config comments. Values survive switching recipes within the dialog but are not saved to YAML or history. Fields display plain text and are intended for installation parameters. Launch profiles also support these input declarations in the connection dialog (Ctrl+Enter).
 

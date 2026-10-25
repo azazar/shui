@@ -106,7 +106,7 @@ Within a revealed group the modifier prefix is shown once; `S SSH` under Alt mea
 
 ## Requirements
 
-Use a UTF-8 terminal with a monospace font. The action bar needs no Powerline or Nerd Font glyphs. Install the tools for the profiles you use: `ssh` for normal connections, `mosh` locally and `mosh-server` remotely for Mosh, or local `mc` for file browsing. SFTP uses local `sftp`; Tmux needs remote `tmux`; Monitor needs remote `btop` (GPU support depends on its build and the remote drivers). The terminal-definition recipe needs local `infocmp` and remote `tic`. Key-auth setup uses `ssh-copy-id` and offers `ssh-keygen` when no keypair exists; the dotfiles sample also uses `scp`.
+Use a UTF-8 terminal with a monospace font. The action bar needs no Powerline or Nerd Font glyphs. Install the tools for the profiles you use: `ssh` for normal connections, `mosh` locally and `mosh-server` remotely for Mosh, or local `mc` for file browsing. SFTP uses local `sftp`; Tmux needs remote `tmux`; Monitor needs remote `btop` (GPU support depends on its build and the remote drivers). Terminal setup needs local `infocmp` and installs missing remote `tic`. Key-auth setup uses SSH and always offers a new pair through `ssh-keygen`; Unix remotes also use OpenSSH fingerprint checks. Dotfiles upload uses `scp`.
 
 ## Command-line options
 

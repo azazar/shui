@@ -387,6 +387,25 @@ pub enum InputType {
     PromptString,
     #[serde(rename = "pickString")]
     PickString,
+    #[serde(rename = "checkbox")]
+    Checkbox,
+}
+
+fn input_default<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Value {
+        Text(String),
+        Checked(bool),
+    }
+    Ok(
+        Option::<Value>::deserialize(deserializer)?.map(|value| match value {
+            Value::Text(text) => text,
+            Value::Checked(checked) => checked.to_string(),
+        }),
+    )
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -397,7 +416,7 @@ pub struct Input {
     pub kind: InputType,
     #[serde(default)]
     pub description: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "input_default")]
     pub default: Option<String>,
     #[serde(default)]
     pub options: Vec<String>,
@@ -417,6 +436,7 @@ pub struct Input {
 #[serde(deny_unknown_fields)]
 struct GeneratedInput {
     description: Option<String>,
+    #[serde(default, deserialize_with = "input_default")]
     default: Option<String>,
     options: Option<Vec<String>>,
 }
@@ -459,9 +479,20 @@ impl Input {
         Ok(resolved)
     }
     pub fn initial(&self) -> String {
-        self.default
-            .clone()
-            .unwrap_or_else(|| self.options.first().cloned().unwrap_or_default())
+        self.default.clone().unwrap_or_else(|| {
+            if self.kind == InputType::Checkbox {
+                "false".into()
+            } else {
+                self.options.first().cloned().unwrap_or_default()
+            }
+        })
+    }
+    pub fn display_value(&self, value: &str) -> String {
+        match self.kind {
+            InputType::Checkbox => if value == "true" { "[x]" } else { "[ ]" }.into(),
+            InputType::PickString if self.options.len() > 1 => format!("← {value} →"),
+            _ => value.to_owned(),
+        }
     }
     pub fn label(&self) -> &str {
         if self.description.is_empty() {
@@ -486,6 +517,7 @@ impl Input {
         }
         if value.chars().any(char::is_control)
             || (self.kind == InputType::PickString && !self.options.contains(&value.to_string()))
+            || (self.kind == InputType::Checkbox && !matches!(value, "true" | "false"))
         {
             return Err(invalid(format!("invalid value for {}", self.label())));
         }
@@ -550,12 +582,15 @@ impl Input {
                     "pickString needs options and its default must be one of them",
                 ));
             }
-            InputType::PromptString if !self.options.is_empty() => {
+            InputType::PromptString | InputType::Checkbox if !self.options.is_empty() => {
                 return Err(invalid("options are only supported for pickString"));
             }
             _ => {}
         }
         self.value_pattern()?;
+        if self.kind == InputType::Checkbox && self.command.is_none() {
+            self.validate_value(&self.initial())?;
+        }
         if self.command.is_none() {
             for value in self.default.iter().chain(&self.options) {
                 // Empty prompt defaults are allowed even for required fields.
@@ -1644,6 +1679,8 @@ mod tests {
             "{id: x, type: promptString, pattern: '[0-9]+', default: abc}",
             "{id: x, type: pickString, pattern: '[0-9]+', options: ['1', abc]}",
             "{id: x, type: promptString, validation_message: ''}",
+            "{id: x, type: checkbox, default: yes}",
+            "{id: x, type: checkbox, options: ['true', 'false']}",
             "{id: x, type: promptString}, {id: x, type: promptString}",
         ] {
             assert!(Config::parse(&format!("default: SSH\nprofiles: [{{name: SSH, command: 'ssh %h'}}]\nconfiguration_scripts: [{{name: Setup, command: 'echo ok', inputs: [{definition}]}}]")).is_err(), "{definition}");
@@ -1658,6 +1695,30 @@ mod tests {
             );
             assert!(Config::parse(&yaml).is_err(), "{command}");
         }
+    }
+
+    #[test]
+    fn checkbox_inputs_use_boolean_values_and_validate_generated_defaults() {
+        for (definition, expected) in [
+            ("{id: x, type: checkbox}", "false"),
+            ("{id: x, type: checkbox, default: true}", "true"),
+            ("{id: x, type: checkbox, default: 'false'}", "false"),
+        ] {
+            let input: Input = serde_yaml_ng::from_str(definition).unwrap();
+            input.validate().unwrap();
+            assert_eq!(input.initial(), expected);
+            input.validate_value("true").unwrap();
+            input.validate_value("false").unwrap();
+            for invalid in ["", "yes", "1", "true false"] {
+                assert!(input.validate_value(invalid).is_err());
+            }
+            assert_eq!(input.display_value("true"), "[x]");
+            assert_eq!(input.display_value("false"), "[ ]");
+        }
+        let input: Input =
+            serde_yaml_ng::from_str("{id: x, type: checkbox, command: 'echo default: true'}")
+                .unwrap();
+        assert_eq!(input.resolve().unwrap().initial(), "true");
     }
 
     #[test]
@@ -1849,7 +1910,11 @@ command: printf '%s' '{"options":["one","two"],"default":"two","description":"Ge
         ));
         assert_eq!(
             input.resolve().unwrap().options,
-            ["id_ed25519.pub", "id_work's key.pub"]
+            [
+                "id_ed25519.pub",
+                "id_work's key.pub",
+                "Generate new Ed25519 key"
+            ]
         );
         fs::remove_file(home.join(".ssh/id_ed25519")).unwrap();
         fs::remove_file(home.join(".ssh/id_work's key")).unwrap();

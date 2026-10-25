@@ -48,7 +48,7 @@ Both installers detect your platform, verify the download, and install to `~/.lo
 
 Windows runs connection clients directly and uses built-in PowerShell for setup; Git and a POSIX shell are not required. Install your preferred SSH client if needed. macOS binaries are unsigned.
 
-[Manual downloads: v0.1.0-rc.11](https://github.com/azazar/shui/releases/tag/v0.1.0-rc.11) · [Build from source](docs/development.md#build-from-source)
+[Manual downloads: v0.1.0-rc.12](https://github.com/azazar/shui/releases/tag/v0.1.0-rc.12) · [Build from source](docs/development.md#build-from-source)
 
 ## Get started
 

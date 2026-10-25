@@ -553,7 +553,9 @@ with tempfile.TemporaryDirectory(prefix="shui-pty-") as directory:
             os.close(master)
             os.close(slave)
 
-    def session(keys, rows=24, cols=100, expected_status=0, args=()):
+    def session(
+        keys, rows=24, cols=100, expected_status=0, args=(), acknowledge_recipes=True
+    ):
         faulthandler.dump_traceback_later(30, repeat=True)
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
@@ -570,6 +572,16 @@ with tempfile.TemporaryDirectory(prefix="shui-pty-") as directory:
             cwd=root,
         )
         output = bytearray()
+        pause_prompt = b"Press Enter to continue..."
+        pause_cursor = 0
+
+        def receive(chunk):
+            nonlocal pause_cursor
+            output.extend(chunk)
+            if acknowledge_recipes:
+                while (position := output.find(pause_prompt, pause_cursor)) >= 0:
+                    pause_cursor = position + len(pause_prompt)
+                    os.write(master, b"\r")
 
         def read_for(seconds):
             end = time.monotonic() + seconds
@@ -578,7 +590,7 @@ with tempfile.TemporaryDirectory(prefix="shui-pty-") as directory:
                     chunk = read_pty(master)
                     if not chunk:
                         break
-                    output.extend(chunk)
+                    receive(chunk)
 
         try:
             deadline = time.monotonic() + 5
@@ -600,6 +612,12 @@ with tempfile.TemporaryDirectory(prefix="shui-pty-") as directory:
                             )
                             read_for(0.05)
                         cursor = position + len(marker)
+                    if key == (pause_prompt,) and not acknowledge_recipes:
+                        read_for(0.2)
+                        assert process.poll() is None, "recipe did not wait for Enter"
+                        assert b"\x1b[?1049h" not in output[cursor:], (
+                            "menu returned before acknowledgement"
+                        )
                     continue
                 if callable(key):
                     key()
@@ -607,7 +625,7 @@ with tempfile.TemporaryDirectory(prefix="shui-pty-") as directory:
                 last_key_start = len(output)
                 os.write(master, key)
                 read_for(0.1)
-            wait_pty(process, master, 3, output.extend)
+            wait_pty(process, master, 3, receive)
             assert process.returncode == expected_status, output
             assert termios.tcgetattr(slave) == before, (
                 "terminal settings were not restored"
@@ -880,20 +898,16 @@ profiles:
             '#!/bin/sh\nprintf "%s\\n" "$@" > "$SHUI_TEST_LOG.' + name + '"\n'
         )
         stub.chmod(0o755)
-    session([ADD_REMOTE, b"setup@example.org:2200", b"\t", b" ", b"\r"])
-    assert (root / "command.ssh-copy-id").read_text().splitlines() == [
-        "-p",
-        "2200",
-        "-i",
-        str(root / ".ssh/id_ed25519.pub"),
-        "setup@example.org",
-    ]
-    (root / "src/dotfiles").mkdir(parents=True)
-    (root / "src/dotfiles/install.sh").write_text("exit 0\n")
     ssh = root / "bin/ssh"
     original_ssh = ssh.read_text()
     ssh.write_text(original_ssh + 'printf "%s\\n" "$@" >> "$SHUI_TEST_LOG.calls"\n')
-    (root / "command.ssh-copy-id").unlink()
+    session([ADD_REMOTE, b"setup@example.org:2200", b"\t", b" ", b"\r"])
+    key_calls = (root / "command.calls").read_text()
+    assert "authorized_keys" in key_calls and "fingerprint=" in key_calls
+    assert str(root / ".ssh/id_ed25519") in key_calls.splitlines()
+    (root / "src/dotfiles").mkdir(parents=True)
+    (root / "src/dotfiles/install.sh").write_text("exit 0\n")
+    (root / "command.calls").unlink()
     session([ADD_REMOTE, b"dotfiles@example.org:2201", b"\t", b"\t", b" ", b"\r"])
     assert not (root / "command.ssh-copy-id").exists()
     assert (root / "command.scp").read_text().splitlines() == [
@@ -952,8 +966,21 @@ configuration_scripts:
     before = (root / ".bash_history").read_text()
     config_before = (root / ".ssh/config").read_text()
     (root / "command").unlink(missing_ok=True)
-    output = session([b"added:2222", b"\x1bOS", b" ", b"\r", RETURNED, b"\x03"])
+    output = session(
+        [
+            b"added:2222",
+            b"\x1bOS",
+            b" ",
+            b"\r",
+            (b"Press Enter to continue...",),
+            b"\r",
+            (b"\x1b[?1049h",),
+            b"\x03",
+        ],
+        acknowledge_recipes=False,
+    )
     assert b"Configure host" in output and b"completed" in output
+    assert b"Test setup finished (" in output
     assert (root / "command.setup").read_text().splitlines() == [
         "added",
         "2222",
@@ -963,7 +990,19 @@ configuration_scripts:
     assert (root / ".bash_history").read_text() == before
     assert (root / ".ssh/config").read_text() == config_before
     child_env["SETUP_EXIT"] = "7"
-    output = session([b"added:2222", b"\x1bOS", b" ", b"\r", RETURNED, b"\x03"])
+    output = session(
+        [
+            b"added:2222",
+            b"\x1bOS",
+            b" ",
+            b"\r",
+            (b"Press Enter to continue...",),
+            b"\r",
+            (b"\x1b[?1049h",),
+            b"\x03",
+        ],
+        acknowledge_recipes=False,
+    )
     assert b"failed" in output and not (root / "command").exists()
     assert (root / ".bash_history").read_text() == before
     del child_env["SETUP_EXIT"]
@@ -1587,6 +1626,10 @@ printf 'generated private key' > "$private"
 printf 'generated public key' > "$private.pub"
 """)
     keygen.chmod(0o755)
+    ssh.write_text(
+        original_ssh
+        + 'case "$*" in *authorized_keys*) printf "%s\\n" "$@" >> "$SHUI_TEST_LOG.key-copy" ;; esac\n'
+    )
     for keyfile in (root / ".ssh").glob("id_*"):
         keyfile.unlink()
     for suffix in ("keygen", "ssh-copy-id"):
@@ -1601,6 +1644,7 @@ printf 'generated public key' > "$private.pub"
     assert (root / ".ssh/id_ed25519.pub").read_text() == "existing public key"
     assert not (root / "command.keygen").exists()
     assert not (root / "command.ssh-copy-id").exists()
+    assert not (root / "command.key-copy").exists()
     assert (root / ".bash_history").read_text() == before
     (root / ".ssh/id_ed25519.pub").unlink()
     (root / "keygen-fail").touch()
@@ -1617,13 +1661,9 @@ printf 'generated public key' > "$private.pub"
         "-f",
         str(root / ".ssh/id_ed25519"),
     ]
-    assert (root / "command.ssh-copy-id").read_text().splitlines() == [
-        "-p",
-        "2202",
-        "-i",
-        str(root / ".ssh/id_ed25519.pub"),
-        "generated",
-    ]
+    copied = (root / "command.key-copy").read_text()
+    assert "fingerprint=" in copied and "generated" in copied.splitlines()
+    assert str(root / ".ssh/id_ed25519") in copied.splitlines()
     assert (root / "command.keygen-tty").read_bytes() == (
         root / "command.tty"
     ).read_bytes()
@@ -1662,12 +1702,14 @@ configuration_scripts:
         b" ",
         b"\r",
     ]
-    session(queue_keys)
+    output = session(queue_keys)
+    assert output.count(b"Press Enter to continue...") == 2
     assert (root / "queue-log").read_text().splitlines() == ["first", "second"]
     (root / "queue-log").unlink()
     (root / "queue-fail").touch()
     (root / "command").unlink()
-    session(queue_keys, expected_status=1)
+    output = session(queue_keys, expected_status=1)
+    assert output.count(b"Press Enter to continue...") == 1
     assert (root / "queue-log").read_text().splitlines() == ["first"]
     assert not (root / "command").exists()
     # A real controlling TTY must remain inaccessible to background checks.

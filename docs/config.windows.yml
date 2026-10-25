@@ -117,10 +117,11 @@ configuration_scripts:
         } finally { $process.Dispose() }
       }
       function Get-KeyPath {
-        param([string]$Name)
+        param([string]$Name, [string]$NewName)
         $directory = Join-Path $env:USERPROFILE '.ssh'
         if ($Name -eq 'Generate new Ed25519 key') {
-          $private = Join-Path $directory 'id_ed25519'
+          if ($NewName -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*$') { throw 'Invalid new key filename' }
+          $private = Join-Path $directory $NewName
           foreach ($path in @($private, "$private.pub")) {
             if (Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue) { throw "Key file already exists: $path" }
           }
@@ -148,21 +149,26 @@ configuration_scripts:
           $files = @()
           if ([IO.Directory]::Exists($directory)) { $files = [IO.Directory]::GetFiles($directory, 'id_*.pub'); [Array]::Sort($files) }
           [Console]::WriteLine('options:')
-          $found = $false
           foreach ($public in $files) {
             if (![IO.File]::Exists($public.Substring(0, $public.Length - 4))) { continue }
             $name = [IO.Path]::GetFileName($public).Replace("'", "''")
             [Console]::WriteLine("  - '" + $name + "'")
-            $found = $true
           }
-          if (!$found) { [Console]::WriteLine("  - 'Generate new Ed25519 key'") }
+          [Console]::WriteLine("  - 'Generate new Ed25519 key'")
+      - id: new_key
+        type: promptString
+        description: New key filename in ~/.ssh (generation only)
+        default: id_ed25519
+        required: true
+        pattern: '[A-Za-z0-9][A-Za-z0-9_.-]*'
+        validation_message: Use a filename without slashes; choose an unused name
       - &windows_expiry
         id: expiry
         type: pickString
         description: Key expiry
         options: [never, 8 hours, day, week, month, year]
         default: never
-    command: . ([scriptblock]::Create(%{windows})); & ([scriptblock]::Create(%{setup_windows})) %h %p %{input:key} %{expiry_remote} %{install_key_remote}
+    command: . ([scriptblock]::Create(%{windows})); & ([scriptblock]::Create(%{setup_windows})) %h %p %{input:key} %{expiry_remote} %{install_key_remote} %{input:new_key}
     install_key_remote: &install_key_remote sh -c %{install_key}
     install_key: &install_key |
       set -eu
@@ -181,9 +187,9 @@ configuration_scripts:
         printf '\n%s\n' "$key" >> "$file"
       fi
     setup_windows: &setup_windows |
-      param($Destination, $Port, $KeyName, $ExpiryRemote, $InstallKeyRemote)
+      param($Destination, $Port, $KeyName, $ExpiryRemote, $InstallKeyRemote, $NewKeyName)
       $ErrorActionPreference = 'Stop'
-      $public = Get-KeyPath $KeyName
+      $public = Get-KeyPath $KeyName $NewKeyName
       $private = $public.Substring(0, $public.Length - 4)
       $key = [IO.File]::ReadAllText($public).Trim() + "`n"
       $connection = @()
@@ -197,6 +203,8 @@ configuration_scripts:
     setup_dotfiles: |
       param($Destination, $Port, $Source, $Installer, $Remote)
       $ErrorActionPreference = 'Stop'
+      if ($Source -eq '~') { $Source = $env:USERPROFILE }
+      elseif ($Source.StartsWith('~/') -or $Source.StartsWith('~\')) { $Source = Join-Path $env:USERPROFILE $Source.Substring(2) }
       if (![IO.Path]::IsPathRooted($Source)) { $Source = Join-Path $env:USERPROFILE $Source }
       if (!(Test-Path -LiteralPath (Join-Path $Source $Installer) -PathType Leaf)) { throw "Missing installer: $Source/$Installer" }
       $connection = @()
@@ -210,7 +218,7 @@ configuration_scripts:
       - id: source
         type: promptString
         description: Local directory (absolute or relative to user profile)
-        default: src/dotfiles
+        default: ~/src/dotfiles
         required: true
       - id: installer
         type: promptString

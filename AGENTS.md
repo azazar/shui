@@ -37,5 +37,8 @@ removing required functionality, correctness, or safety.
   policies, or add repositories as an incidental part of another task.
 - Keep consequential optional behavior explicit in the title or inputs, with
   conservative defaults. Honor selected cleanup scopes; do not broaden them.
+- Use checkbox inputs for independent options that can be selected together.
+  Reserve dropdowns for mutually exclusive choices, and state destructive effects
+  explicitly rather than hiding them behind a generic cleanup mode.
 - Retain necessary validation, safe quoting, failure reporting, and safeguards.
   Tests should verify the promised result and absence of unrelated side effects.

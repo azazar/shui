@@ -100,31 +100,41 @@ fn export_docker_fixtures() {
             let mut podman = values.clone();
             podman.insert("engine".into(), "Podman".into());
             write("podman", p.command_with_inputs(&target, &podman).unwrap());
+            let mut runtime = values.clone();
+            runtime.insert("runsc".into(), "true".into());
+            write(
+                "containers-runsc",
+                p.command_with_inputs(&target, &runtime).unwrap(),
+            );
         }
         if id == "logs" {
             let mut limits = values.clone();
             limits.insert("disk".into(), "16M".into());
             limits.insert("runtime".into(), "16M".into());
             limits.insert("days".into(), "2".into());
+            let mut no_archives = limits.clone();
+            no_archives.insert("cleanup".into(), "false".into());
+            write(
+                "logs-no-archives",
+                p.command_with_inputs(&target, &no_archives).unwrap(),
+            );
             write(
                 "journald-small",
                 p.command_with_inputs(&target, &limits).unwrap(),
             );
             let mut cleanup = limits.clone();
-            cleanup.insert("caches".into(), "Package and login-user caches".into());
+            cleanup.insert("package_caches".into(), "true".into());
+            cleanup.insert("user_caches".into(), "true".into());
             write(
                 "logs-retention",
                 p.command_with_inputs(&target, &cleanup).unwrap(),
             );
-            cleanup.insert(
-                "cleanup".into(),
-                "Remove all archives and selected caches".into(),
-            );
+            cleanup.insert("all_archives".into(), "true".into());
             write(
                 "logs-cleanup",
                 p.command_with_inputs(&target, &cleanup).unwrap(),
             );
-            cleanup.insert("guests".into(), "Running guests recursively".into());
+            cleanup.insert("guests".into(), "true".into());
             write(
                 "logs-guests",
                 p.command_with_inputs(&target, &cleanup).unwrap(),
@@ -152,6 +162,7 @@ fn export_docker_fixtures() {
                 ("firewall-invalid-ip", "not-an-ip", ""),
                 ("firewall-invalid-port", "", "70000/tcp"),
                 ("firewall-ssh-bypass", "192.0.2.2", "2200-2300/tcp"),
+                ("firewall-ssh-udp", "", "2222/udp"),
             ] {
                 let mut options = values.clone();
                 options.insert("ssh_ips".into(), ips.into());
@@ -182,6 +193,11 @@ fn export_docker_fixtures() {
             generated.insert("key".into(), "Generate new Ed25519 key".into());
             write(
                 "auth-generate",
+                p.command_with_inputs(&target, &generated).unwrap(),
+            );
+            generated.insert("new_key".into(), "id_second".into());
+            write(
+                "auth-generate-second",
                 p.command_with_inputs(&target, &generated).unwrap(),
             );
         }

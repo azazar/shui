@@ -403,7 +403,9 @@ fn container_setup_installs_and_starts_without_upgrading_the_host() {
         // Only OS discovery is replaced; execute the shipped package/install logic.
         let script = p.fields.get_mut("script").unwrap();
         *script = script.replace(". /etc/os-release", ". \"$HOME/os-release\"");
-        p.command = "sh -c %{script} -- %{input:engine}".into();
+        p.command =
+            "sh -c %{script} -- %{input:engine} %{input:runsc} %{input:runq} %{input:nvidia}"
+                .into();
         stdout(env.run(&p, None, Some(("engine", choice))));
         let packages = fs::read_to_string(env.0.join("packages")).unwrap();
         assert!(packages.lines().any(|arg| arg == binary));
@@ -423,6 +425,117 @@ fn container_setup_installs_and_starts_without_upgrading_the_host() {
             assert_eq!(services, before, "Podman is daemonless");
         }
     }
+}
+
+#[test]
+fn unix_key_installation_checks_identity_and_preserves_restricted_keys() {
+    let env = Sandbox::new("unix-key-install");
+    for tool in ["mkdir", "cat", "awk", "chmod"] {
+        env.link(tool);
+    }
+    env.stub(
+        "ssh-keygen",
+        r#"
+if [ "$2" = - ]; then content=$(cat); else content=$(cat "$2"); fi
+for blob in AAAA BBBB; do
+  case "$content" in *"ssh-ed25519 $blob"*) printf '256 SHA256:%s fixture\n' "$blob" ;; esac
+done
+"#,
+    );
+    let mut p = profile("Configure key-based auth");
+    p.command = "sh -c %{install_key}".into();
+    p.inputs.clear();
+    fs::create_dir_all(env.0.join(".ssh")).unwrap();
+    let file = env.0.join(".ssh/authorized_keys");
+    let original = "restrict ssh-ed25519 BBBB previous";
+    fs::write(&file, original).unwrap();
+    stdout(env.run_input(&p, None, None, b"ssh-ed25519 BBBB same-key\n"));
+    assert_eq!(fs::read_to_string(&file).unwrap(), original);
+    for _ in 0..2 {
+        stdout(env.run_input(&p, None, None, b"ssh-ed25519 AAAA new-key\n"));
+    }
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        format!("{original}\nssh-ed25519 AAAA new-key\n")
+    );
+    let before = fs::read(&file).unwrap();
+    assert!(
+        !env.run_input(&p, None, None, b"invalid-key\n")
+            .status
+            .success()
+    );
+    assert_eq!(fs::read(&file).unwrap(), before);
+}
+
+#[test]
+fn new_key_generation_can_choose_an_unused_filename_without_overwriting_keys() {
+    let env = Sandbox::new("new-key-filename");
+    env.link("mkdir");
+    fs::create_dir_all(env.0.join(".ssh")).unwrap();
+    fs::write(env.0.join(".ssh/id_ed25519"), "existing private key").unwrap();
+    env.stub(
+        "ssh-keygen",
+        r#"
+while [ "$1" != -f ]; do shift; done
+printf 'new private key' > "$2"
+printf 'new public key' > "$2.pub"
+"#,
+    );
+    let mut p = profile("Configure key-based auth");
+    let input = p.inputs.iter_mut().find(|i| i.id == "key").unwrap();
+    input.command = None;
+    input.options = vec!["Generate new Ed25519 key".into()];
+    p.command = "sh -c %{prepare_key} -- %{input:key} %{input:new_key}".into();
+    assert!(!env.run(&p, None, None).status.success());
+    let output = stdout(env.run(&p, None, Some(("new_key", "id_second"))));
+    assert_eq!(
+        output.trim(),
+        env.0.join(".ssh/id_second.pub").to_str().unwrap()
+    );
+    assert_eq!(
+        fs::read_to_string(env.0.join(".ssh/id_ed25519")).unwrap(),
+        "existing private key"
+    );
+    assert!(env.0.join(".ssh/id_second").exists());
+}
+
+#[test]
+fn runtime_checkboxes_select_packages_and_reject_incompatible_engines() {
+    let env = Sandbox::new("runtime-options");
+    fs::write(env.0.join("os-release"), "ID=arch\n").unwrap();
+    env.stub(
+        "pacman",
+        r#"
+printf '%s\n' "$@" >> "$HOME/packages"
+case " $* " in *' runsc '*|*' nvidia-container-toolkit '*) exit 42 ;; esac
+"#,
+    );
+    env.stub("docker", "echo operational");
+    for service in ["systemctl", "rc-service", "rc-update"] {
+        env.stub(service, "exit 0");
+    }
+    let mut p = profile("Install Docker / Podman");
+    for input in &mut p.inputs {
+        if matches!(input.id.as_str(), "runsc" | "nvidia") {
+            input.default = Some("true".into());
+        }
+    }
+    let script = p.fields.get_mut("script").unwrap();
+    *script = script.replace(". /etc/os-release", ". \"$HOME/os-release\"");
+    p.command =
+        "sh -c %{script} -- %{input:engine} %{input:runsc} %{input:runq} %{input:nvidia}".into();
+    let output = env.run(&p, None, None);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("enabled repositories"));
+    let packages = fs::read_to_string(env.0.join("packages")).unwrap();
+    for package in ["runsc", "nvidia-container-toolkit"] {
+        assert!(packages.lines().any(|line| line == package));
+    }
+    fs::remove_file(env.0.join("packages")).unwrap();
+    let output = env.run(&p, None, Some(("engine", "Podman")));
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("require Docker"));
+    assert!(!env.0.join("packages").exists());
 }
 
 #[test]
@@ -647,6 +760,7 @@ fn shell_firewall_validation_rejects_bad_inputs_before_changing_rules() {
         ("ports", "70000/tcp", "Port range"),
         ("ports", "9000-8000/tcp", "Port range"),
         ("ports", "2200-2300/tcp", "Configure SSH access"),
+        ("ports", "2222/udp", "Configure SSH access"),
         ("ports", "80/tcp;echo", "Ports require"),
     ] {
         let out = env.run(&p, None, Some((id, value)));
@@ -666,7 +780,7 @@ fn shell_log_validation_rejects_invalid_limits_before_maintenance() {
     env.link("bash");
     env.stub("jq", "echo unexpected > \"$HOME/changed\"; exit 99");
     let mut p = profile("Configure log limits and cleanup");
-    p.command = "bash -c %{maintenance} -- unused-bootstrap unused-source %{input:disk} %{input:runtime} %{input:days} %{input:file_size} %{input:backups} %{input:cleanup} %{input:caches} %{input:guests} %{input:depth}".into();
+    p.command = "bash -c %{maintenance} -- unused-bootstrap unused-source %{input:disk} %{input:runtime} %{input:days} %{input:file_size} %{input:backups} %{input:cleanup} %{input:all_archives} %{input:package_caches} %{input:user_caches} %{input:all_users} %{input:guests} %{input:depth}".into();
     for input in &mut p.inputs {
         input.pattern = None;
     }

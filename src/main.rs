@@ -1077,6 +1077,13 @@ fn run() -> io::Result<()> {
                 let script = &config.configuration_scripts[index];
                 println!("Running {} for {}", script.name, target.label());
                 let status = Command::new(program).args(args).status();
+                match &status {
+                    Ok(status) => println!("{} finished ({status}).", script.name),
+                    Err(error) => eprintln!("Could not run {}: {error}", script.name),
+                }
+                print!("Press Enter to continue...");
+                io::stdout().flush()?;
+                io::stdin().read_line(&mut String::new())?;
                 if configure_only {
                     setup_failed = !status.as_ref().is_ok_and(|status| status.success());
                     state.notice = Some(match status {
