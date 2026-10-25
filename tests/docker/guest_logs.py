@@ -71,6 +71,7 @@ def rootfs(root, identity):
                 "chmod",
                 "dirname",
                 "mktemp",
+                "mkdir",
                 "mv",
                 "rm",
                 "sed",
