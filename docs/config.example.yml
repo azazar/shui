@@ -29,7 +29,7 @@
 # and a 64 KiB limit on each output stream. They have no controlling terminal
 # on Unix, so prompts cannot interfere with the menu.
 # These checks do not test remote connectivity or remote tool availability.
-# Shipped profiles only launch their named tool; install missing tools separately.
+# Shipped profiles launch their named tool; Zellij can use a verified temporary download.
 # prepare_command runs locally with the terminal restored, before setup/connect/history.
 # Exit 0 continues; any failure/cancellation returns to the menu. It supports %h,
 # %p, %t and named fields, but not dialog inputs. It is only for launch profiles.
@@ -63,7 +63,58 @@ profiles:
     available_command: command -v ssh
     key: Alt+Z
     command: port=%p; exec ssh ${port:+-p "$port"} -tt -- %h %{remote}
-    remote: exec zellij attach --create options --show-startup-tips false --show-release-notes false
+    remote: sh -c %{script}
+    script: |
+      set -eu
+      if command -v zellij >/dev/null 2>&1; then
+        exec zellij attach --create options --show-startup-tips false --show-release-notes false
+      elif [ -x "$HOME/.local/bin/zellij" ]; then
+        exec "$HOME/.local/bin/zellij" attach --create options --show-startup-tips false --show-release-notes false
+      fi
+      fail() { printf 'shui: %s\n' "$*" >&2; exit 1; }
+      case "$(uname -s):$(uname -m)" in
+        Linux:x86_64)
+          platform=x86_64-unknown-linux-musl
+          expected=d006c521dcb475a6005d741e9dd7c5758e5a23b28dd60a5c10cebfa4876319dd ;;
+        Linux:aarch64|Linux:arm64)
+          platform=aarch64-unknown-linux-musl
+          expected=2a2c0621e6f3b11ecbb05d66939a48000a2508604620aa20727a5fd61c49f451 ;;
+        *) fail 'Install Zellij in your user profile on this platform; portable downloads support Linux x86-64/ARM64.' ;;
+      esac
+      command -v tar >/dev/null 2>&1 || fail 'tar is required to unpack portable Zellij'
+      if command -v sha256sum >/dev/null 2>&1; then
+        checksum=sha256sum
+      elif command -v shasum >/dev/null 2>&1; then
+        checksum=shasum
+      else
+        fail 'sha256sum or shasum is required to verify portable Zellij'
+      fi
+      umask 077
+      work=$(mktemp -d "${TMPDIR:-/tmp}/shui-zellij.XXXXXX")
+      trap 'rm -rf -- "$work"' 0
+      trap 'exit 1' HUP INT TERM
+      url=https://github.com/zellij-org/zellij/releases/download/v0.45.1/zellij-$platform.tar.gz
+      printf 'Downloading temporary Zellij 0.45.1...\n' >&2
+      if command -v curl >/dev/null 2>&1; then
+        curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location \
+          --retry 2 --connect-timeout 15 --max-time 180 --silent --show-error \
+          --output "$work/zellij.tar.gz" "$url" || fail 'Zellij download failed'
+      elif command -v wget >/dev/null 2>&1; then
+        wget --https-only --timeout=30 --tries=2 -q -O "$work/zellij.tar.gz" "$url" || fail 'Zellij download failed'
+      else
+        fail 'curl or wget is required to download portable Zellij'
+      fi
+      tar -xzf "$work/zellij.tar.gz" -C "$work" zellij || fail 'Cannot extract Zellij'
+      [ -f "$work/zellij" ] && [ ! -L "$work/zellij" ] || fail 'Invalid Zellij archive member'
+      if [ "$checksum" = sha256sum ]; then
+        digest=$(sha256sum "$work/zellij")
+      else
+        digest=$(shasum -a 256 "$work/zellij")
+      fi
+      [ "${digest%% *}" = "$expected" ] || fail 'Zellij checksum mismatch; refusing to execute it'
+      chmod 700 "$work/zellij"
+      # Keep the wrapper alive to remove its temporary files after exit or detach.
+      "$work/zellij" attach --create options --show-startup-tips false --show-release-notes false
 
   # Persistent sessions, file transfers, monitoring and SSH forwarding.
   - name: Tmux

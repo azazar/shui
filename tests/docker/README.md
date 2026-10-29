@@ -33,7 +33,7 @@ The runner exports fixtures through the app's Rust configuration parser and comm
 | Arch Linux | `archlinux:base` | pacman |
 | openSUSE Tumbleweed | `opensuse/tumbleweed:latest` | zypper |
 
-Images track distribution updates rather than immutable digests so repository/package changes are exercised. Bootstrap installs test prerequisites: Python, SSH, sudo, certificates, download/archive tools, process tools, diffutils, ncurses, Bash, tmux and btop. Rocky enables EPEL for btop. The harness provisions checksum-verified Zellij 0.45.1; no launch profile installs or downloads software.
+Images track distribution updates rather than immutable digests so repository/package changes are exercised. Bootstrap installs test prerequisites: Python, SSH, sudo, certificates, download/archive tools, process tools, diffutils, ncurses, Bash, tmux and btop. Rocky enables EPEL for btop. The harness provisions checksum-verified Zellij 0.45.1 in the remote user's home; these checks exercise the existing-executable launch path. `tests/zellij.py` also checks the portable-download path offline, including checksum rejection and temporary-file cleanup.
 
 ## Coverage
 
