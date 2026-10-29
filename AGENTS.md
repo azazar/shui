@@ -25,6 +25,12 @@ removing required functionality, correctness, or safety.
   (for example, Zellij). Keep such downloads verified and temporary, and clean up
   owned temporary files. Do not silently install software, run unrelated commands,
   or rewrite configuration as a side effect of connecting.
+- Connection profiles must work as ordinary users, locally and remotely, without
+  root, administrator privileges, or sudo. Any profile-managed files belong only
+  in the user's home/profile or owned temporary storage, never system locations
+  such as `/usr/bin` or `/usr/local/bin`. System installation and configuration
+  belong exclusively to explicit setup recipes. Test profile launches as ordinary
+  users without sudo access; provision user-local fixtures in the test user's home.
 - Reasonable launch arguments are welcome (for example, disabling Zellij startup
   tips and release notes). Do not force unexpected session names, layouts, or
   application settings. Preserve normal tool behavior unless the entry or an

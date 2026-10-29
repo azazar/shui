@@ -7,9 +7,11 @@ import json
 import os
 from pathlib import Path
 import pty
+import pwd
 import re
 import select
 import shlex
+import shutil
 import socket
 import struct
 import subprocess
@@ -33,12 +35,12 @@ def remote(command, check=True):
 
 def available(tool):
     command = f"command -v {shlex.quote(tool)} >/dev/null 2>&1"
-    if tool == "zellij":
-        command += ' || test -x "$HOME/.local/bin/zellij"'
     return remote(command, check=False).returncode == 0
 
 
-def interactive(name, command, *, consent="y", finish=None, expected=0, timeout=600):
+def interactive(
+    name, command, *, consent="y", finish=None, expected=0, timeout=600, user=None
+):
     """Respond only to known fixture/password/install prompts; preserve a real tty."""
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 120, 0, 0))
@@ -47,13 +49,21 @@ def interactive(name, command, *, consent="y", finish=None, expected=0, timeout=
         os.setsid()
         fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
+    env = dict(os.environ, TERM="xterm-256color")
+    credentials = {}
+    if user:
+        account = pwd.getpwnam(user)
+        assert account.pw_uid != 0, "profile client must be an ordinary user"
+        env.update(HOME=account.pw_dir, USER=user, LOGNAME=user)
+        credentials = dict(user=account.pw_uid, group=account.pw_gid, extra_groups=[])
     process = subprocess.Popen(
         command,
         stdin=slave,
         stdout=slave,
         stderr=slave,
         preexec_fn=controlling_tty,
-        env=dict(os.environ, TERM="xterm-256color"),
+        env=env,
+        **credentials,
     )
     os.close(slave)
     log = (RESULTS / f"{name}.log").open("wb", buffering=0)
@@ -165,7 +175,7 @@ PermitRootLogin no
 PidFile /run/shui-test-sshd.pid
 Subsystem sftp internal-sftp
 AcceptEnv http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY
-SetEnv ENV=/home/remote/.profile LANG=C.UTF-8
+SetEnv ENV=/home/remote/.profile LANG=C.UTF-8 PATH=/home/remote/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 """)
     effective = subprocess.run(
         ["/usr/sbin/sshd", "-T", "-f", str(config)],
@@ -220,12 +230,12 @@ def shell_finish(master, text):
 def profile(name, finish, tool=None):
     if tool:
         assert available(tool), f"test harness must provision {tool}"
-    output, prompts = script(name, finish=finish)
+    output, prompts = script(name, finish=finish, user="client")
     assert prompts == 0, f"{name}: launch must not offer installation"
     if name in ["ssh", "bash"]:
         assert "\r\nSHUI_SHELL_OK:/home/remote\r\n" in output, output[-2000:]
     # A second launch must reconnect without installation or setup prompts.
-    _, prompts = script(f"{name}-reuse", name, finish=finish)
+    _, prompts = script(f"{name}-reuse", name, finish=finish, user="client")
     assert prompts == 0, f"{name}: repeated the dependency installation"
 
 
@@ -346,6 +356,31 @@ def run():
         assert not list(Path("/tmp").glob("shui-terminfo.*"))
         os.environ["TERM"] = "xterm-256color"
 
+        # Recipes use the root client; profile launches must not rely on that.
+        client_ssh = Path("/home/client/.ssh")
+        client_ssh.mkdir(mode=0o700)
+        for name in ["id_ed25519", "known_hosts"]:
+            shutil.copy2(Path("/root/.ssh") / name, client_ssh / name)
+        (client_ssh / "config").write_text(
+            Path("/root/.ssh/config").read_text().replace("/root/", "/home/client/")
+        )
+        (client_ssh / "config").chmod(0o600)
+        for path in [client_ssh, *client_ssh.iterdir()]:
+            shutil.chown(path, user="client", group="client")
+        sudo_policy = Path("/etc/sudoers.d/shui-test")
+        recipe_policy = sudo_policy.read_text()
+        sudo_policy.write_text("remote ALL=(ALL) !ALL\nclient ALL=(ALL) !ALL\n")
+        assert remote("id -u").stdout.strip() != "0"
+        assert remote("sudo -n true", check=False).returncode != 0
+        assert remote("command -v zellij").stdout.strip() == (
+            "/home/remote/.local/bin/zellij"
+        )
+        assert Path("/home/remote/.local/bin/zellij").stat().st_uid == (
+            pwd.getpwnam("remote").pw_uid
+        )
+        assert not Path("/usr/bin/zellij").exists()
+        assert not Path("/usr/local/bin/zellij").exists()
+
         profile("ssh", shell_finish)
         profile("bash", shell_finish, "bash")
 
@@ -402,6 +437,8 @@ def run():
         while live_zellij_sessions():
             assert time.monotonic() < deadline, "Zellij did not stop"
             time.sleep(0.1)
+        # Restore setup privileges only after all ordinary-user profile checks.
+        sudo_policy.write_text(recipe_policy)
         # Sudo recipes run last to isolate their authentication changes.
         distro = dict(
             line.split("=", 1)

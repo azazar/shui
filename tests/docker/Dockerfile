@@ -18,6 +18,8 @@ COPY container.py /tests/container.py
 COPY services.py /tests/services.py
 COPY guest_logs.py /tests/guest_logs.py
 COPY fixtures /tests/fixtures
+# Fixture exports may inherit a restrictive host umask; clients are unprivileged.
+RUN chmod -R a+rX /tests/fixtures
 ENV TERM=xterm-256color
 ENV LANG=C.UTF-8
 CMD ["python3", "-u", "/tests/container.py"]

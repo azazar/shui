@@ -21,7 +21,7 @@ python3 tests/docker/run.py
 python3 tests/docker/run.py --distro ubuntu --distro alpine --jobs 2
 ```
 
-The runner exports fixtures through the app's Rust configuration parser and command renderer, then builds disposable images and runs a real SSH server inside each container. It does not read your SSH keys, mount your home, publish ports, or install packages on the host. The remote account is unprivileged; its test-only sudo access exercises the installers' non-root path.
+The runner exports fixtures through the app's Rust configuration parser and command renderer, then builds disposable images and runs a real SSH server inside each container. It does not read your SSH keys, mount your home, publish ports, or install packages on the host. Profile launches run as an ordinary local `client` account connecting to the ordinary `remote` account, with sudo denied to both during profile checks. Setup recipes use a root client and grant the remote account test-only sudo access to exercise the installers' non-root path.
 
 | Distribution | Image | Package manager |
 | --- | --- | --- |
@@ -53,7 +53,7 @@ No package-manager, SSH, tmux, btop or Zellij executables are mocked. A pseudo-t
 
 Bootstrap checks for `awk`, `cmp`, `tic`, and `infocmp`; openSUSE explicitly installs gawk and ncurses-devel for the terminfo tools. The loopback SSH fixture disables per-source penalties when supported because the expiry tests deliberately attempt rejected authentication. The terminfo check uses the root client's system database and verifies the remote user's private database explicitly, accommodating ncurses builds that ignore root's home directory.
 
-The openSUSE image also creates `/run/tmux` with the same shared-directory permissions normally supplied by systemd-tmpfiles. Containers do not run that service, and the packaged tmux needs the directory when it starts.
+The Zellij fixture is installed in the remote user's `~/.local/bin`, owned by that user. The test SSH environment includes this directory in `PATH`, including for non-login commands; the launch profile requires neither installation nor root access. The openSUSE image also creates `/run/tmux` with the same shared-directory permissions normally supplied by systemd-tmpfiles. Containers do not run that service, and the packaged tmux needs the directory when it starts.
 
 The Arch test container adds `PERFMON` and `DAC_READ_SEARCH` to its capability bounding set, matching the file capabilities on its packaged btop. Without these, Linux rejects execution with “Operation not permitted.” The container retains its isolated filesystem and process namespaces; it does not use privileged mode.
 

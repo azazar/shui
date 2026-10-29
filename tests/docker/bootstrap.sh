@@ -63,6 +63,7 @@ done
 mkdir -p /run/sshd /results /root/.ssh
 chmod 700 /root/.ssh
 useradd -m -U -s /bin/sh remote
+useradd -m -U -s /bin/sh client
 printf 'remote:shui-test-password\n' | chpasswd
 printf 'Defaults env_keep += "http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY"\nremote ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/shui-test
 chmod 440 /etc/sudoers.d/shui-test
@@ -85,4 +86,6 @@ curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location \
   -o "$work/zellij.tar.gz" "https://github.com/zellij-org/zellij/releases/download/v0.45.1/zellij-$platform.tar.gz"
 tar -xzf "$work/zellij.tar.gz" -C "$work" zellij
 printf '%s  %s\n' "$expected" "$work/zellij" | sha256sum -c -
-install -m 755 "$work/zellij" /usr/local/bin/zellij
+# Keep the fixture in the remote user's profile, not the system directories.
+install -d -m 755 -o remote -g remote /home/remote/.local /home/remote/.local/bin
+install -m 755 -o remote -g remote "$work/zellij" /home/remote/.local/bin/zellij
