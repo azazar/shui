@@ -823,7 +823,7 @@ configuration_scripts:
         set -e
         path=$1
         [[ ! -L $path ]] || fail "Refusing symlinked configuration: $path"
-        mkdir -p -- "$(dirname "$path")"
+        (umask 022; mkdir -p -- "$(dirname "$path")")
         temporary=$(mktemp "${path}.shui.XXXXXX")
         trap 'rm -f -- "$temporary"' EXIT
         cat > "$temporary"
@@ -902,6 +902,8 @@ configuration_scripts:
         if command -v podman >/dev/null; then
           printf '[containers]\nlog_driver="k8s-file"\nlog_size_max=%s\n' "$file_bytes" |
             write_config /etc/containers/containers.conf.d/90-shui-logging.conf
+          # Repair directories created with umask 077 by earlier recipes.
+          chmod 755 /etc/containers/containers.conf.d
           echo 'WARNING: Podman limits apply to new containers; existing containers require recreation and user overrides may take precedence'
         fi
       }

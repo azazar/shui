@@ -775,6 +775,60 @@ fn shell_firewall_validation_rejects_bad_inputs_before_changing_rules() {
 }
 
 #[test]
+fn podman_logging_configuration_is_readable_by_ordinary_users() {
+    let env = Sandbox::new("podman-config-permissions");
+    for tool in [
+        "bash", "mkdir", "dirname", "mktemp", "cat", "chmod", "mv", "rm",
+    ] {
+        env.link(tool);
+    }
+    env.stub("podman", "exit 0");
+    let mut p = profile("Configure log limits and cleanup");
+    let script = &p.fields["maintenance"];
+    let writer = script
+        .split("write_config() (")
+        .nth(1)
+        .unwrap()
+        .split("journals() {")
+        .next()
+        .unwrap();
+    let containers = script
+        .split("container_logs() {")
+        .nth(1)
+        .unwrap()
+        .split("libvirt_logs() {")
+        .next()
+        .unwrap();
+    let script = format!("set -eu\numask 077\nfile_bytes=1024\nwrite_config() ({writer}\ncontainer_logs() {{{containers}\ncontainer_logs")
+        .replace("/etc/containers", &format!("{}/containers", env.0.display()));
+    p.fields.insert("test_script".into(), script);
+    p.command = "bash -c %{test_script}".into();
+    let directory = env.0.join("containers/containers.conf.d");
+    for repair in [false, true] {
+        if repair {
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        stdout(env.run(&p, None, None));
+        for path in [env.0.join("containers"), directory.clone()] {
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+        }
+        let file = directory.join("90-shui-logging.conf");
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        assert!(
+            fs::read_to_string(file)
+                .unwrap()
+                .contains("log_size_max=1024")
+        );
+    }
+}
+
+#[test]
 fn shell_log_validation_rejects_invalid_limits_before_maintenance() {
     let env = Sandbox::new("log-validation");
     env.link("bash");
