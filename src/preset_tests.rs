@@ -1480,7 +1480,8 @@ esac
         "echo \"${TARGET:-host}:$1\" >> \"$HOME/actions\"; [ \"${TARGET:-host}\" != broken ]"
             .into(),
     );
-    p.command = "sh -c %{traverse} -- %{script} %{traverse} %{input:reboot} 3".into();
+    let traverse = "TARGET=host sh -c %{traverse} -- %{script} %{traverse} %{input:reboot}";
+    p.command = format!("{traverse} 3");
     let output = env.run(&p, None, None);
     assert!(!output.status.success());
     let actions = fs::read_to_string(env.0.join("actions")).unwrap();
@@ -1513,7 +1514,7 @@ esac
             .contains("qemu:true")
     );
     fs::remove_file(env.0.join("actions")).unwrap();
-    p.command = "sh -c %{traverse} -- %{script} %{traverse} %{input:reboot} 0".into();
+    p.command = format!("{traverse} 0");
     let output = env.run(&p, None, None);
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("depth limit"));
@@ -1537,7 +1538,7 @@ case "$1" in
 esac
 "#,
     );
-    p.command = "sh -c %{traverse} -- %{script} %{traverse} %{input:reboot} 3".into();
+    p.command = format!("{traverse} 3");
     let output = env.run(&p, None, None);
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("16-guest limit"));
