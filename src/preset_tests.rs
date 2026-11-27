@@ -5,17 +5,19 @@ use crate::{
 };
 use std::{
     fs,
-    io::Write,
     os::unix::fs::{PermissionsExt, symlink},
     path::PathBuf,
-    process::{Command, Output, Stdio},
+    process::{Command, Output},
 };
 
 struct Sandbox(PathBuf);
 impl Sandbox {
     fn new(name: &str) -> Self {
-        let root = std::env::temp_dir().join(format!("shui-presets-{name}-{}", std::process::id()));
-        fs::create_dir_all(root.join("bin")).unwrap();
+        // Match the physical paths reported by find -execdir when TMPDIR is a symlink.
+        let temp = std::env::temp_dir().canonicalize().unwrap();
+        let root = temp.join(format!("shui-presets-{name}-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(root.join("bin")).unwrap();
         let sandbox = Self(root);
         sandbox.link("sh");
         sandbox
@@ -30,7 +32,7 @@ impl Sandbox {
             .args(["-c", &format!("command -v {name}")])
             .output()
             .unwrap();
-        assert!(found.status.success());
+        assert!(found.status.success(), "missing recipe test tool: {name}");
         if name == "awk" {
             let program = String::from_utf8(found.stdout).unwrap();
             self.stub(
@@ -83,20 +85,18 @@ exit "$status""#,
                 &values,
             )
             .unwrap();
-        let mut child = Command::new(program)
+        let input_path = self.0.join("stdin");
+        fs::write(&input_path, stdin).unwrap();
+        Command::new(program)
             .current_dir(&self.0)
             .args(args)
             .env("PATH", self.0.join("bin"))
             .env("HOME", &self.0)
             .env("TMPDIR", &self.0)
             .env("TERM", "test-terminal")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child.stdin.take().unwrap().write_all(stdin).unwrap();
-        child.wait_with_output().unwrap()
+            .stdin(fs::File::open(input_path).unwrap())
+            .output()
+            .unwrap()
     }
 }
 impl Drop for Sandbox {
@@ -983,19 +983,10 @@ fn bundled_recipe_payloads_parse_in_their_documented_shell() {
                 continue;
             }
             let shell = if field == "maintenance" { "bash" } else { "sh" };
-            let mut child = Command::new(shell)
-                .arg("-n")
-                .stdin(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
+            let output = Command::new(shell)
+                .args(["-n", "-c", source])
+                .output()
                 .unwrap();
-            child
-                .stdin
-                .take()
-                .unwrap()
-                .write_all(source.as_bytes())
-                .unwrap();
-            let output = child.wait_with_output().unwrap();
             assert!(
                 output.status.success(),
                 "{}/{field}: {}",
@@ -1893,7 +1884,7 @@ fn key_expiry_updates_all_matching_entries_and_preserves_restrictions() {
         env.link(tool);
     }
     let date = Command::new("sh")
-        .args(["-c", "command -v date"])
+        .args(["-c", "command -p -v date"])
         .output()
         .unwrap();
     let date = String::from_utf8(date.stdout).unwrap();
@@ -1956,10 +1947,13 @@ fn key_expiry_updates_all_matching_entries_and_preserves_restrictions() {
     );
     assert_eq!(fs::read_to_string(&authorized).unwrap(), original);
     p.command = "sh -c %{set_expiry} -- invalid".into();
-    assert!(
-        !env.run_input(&p, None, None, b"ssh-ed25519 AAAATEST\n")
-            .status
-            .success()
+    // Reject the option even when more than a pipeful of input is waiting.
+    let keys = b"ssh-ed25519 AAAATEST\n".repeat(8192);
+    let output = env.run_input(&p, None, None, &keys);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr).trim(),
+        "Unknown key expiry."
     );
     assert_eq!(fs::read_to_string(&authorized).unwrap(), original);
     assert!(!fs::read_dir(env.0.join(".ssh")).unwrap().any(|f| {

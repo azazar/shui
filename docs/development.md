@@ -29,6 +29,13 @@ python3 tests/cli.py target/x86_64-unknown-linux-musl/release/shui
 python3 tests/terminal.py target/x86_64-unknown-linux-musl/release/shui
 ```
 
+On macOS, the Rust tests execute Linux setup recipes locally. To use the same tools as the Intel and Apple Silicon CI runners:
+
+```sh
+micromamba create -n recipe-tests -c conda-forge bash coreutils findutils sed jq
+micromamba run -n recipe-tests cargo test --locked
+```
+
 The shared Rust action suite (`cargo test --locked action_tests`) enumerates the binding registry and runs every action, alias and an alternative binding through the production menu, dialog, help and editor loops. It checks selections, generated commands, text edits, focus, scrolling, modifier hints and editor reloads using one in-memory terminal harness. New actions without an outcome scenario fail the suite. It also covers shipped profile shortcuts, key releases, repeats and dialog validation. Only terminal I/O and external editor execution are substituted; commands are inspected without contacting hosts.
 
 The terminal suite checks rendered screens after real keyboard, modifier, focus and resize events. It compares dialog anchors across recipes and profiles, scroll positions, visible selections and shortcut groups at several terminal sizes. Use `python3 tests/terminal.py PATH_TO_SHUI --interaction-only` for this focused pass. When auditing UI changes, check the entire screen before and after an interaction; checking that individual labels occur in terminal output misses stale hints, overlapping content and layout movement.

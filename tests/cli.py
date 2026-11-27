@@ -20,7 +20,7 @@ runner = [wine, os.environ["SHUI_TEST_WINE_RUNNER"]] if wine else []
 if wine:
     binary = target_path(binary)
 with tempfile.TemporaryDirectory(prefix="shui cli ü-") as directory:
-    root = Path(directory)
+    root = Path(directory).resolve()
     env = {key: value for key, value in os.environ.items()
            if key not in ("HOME", "USER", "USERPROFILE", "USERNAME", "XDG_CONFIG_HOME", "DISPLAY", "WAYLAND_DISPLAY")}
 
