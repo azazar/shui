@@ -92,6 +92,30 @@ profiles:
     assert run("--check-config").returncode == 0
     assert not marker.exists(), "default config validation executed a command"
     assert default_config.read_text(encoding="utf-8") == valid_source
+    default_config.write_text(
+        valid_source
+        + """  - name: Work
+    shell: direct
+    command: custom-client --target %h
+    port_args: ['--port', '%p']
+""",
+        encoding="utf-8",
+    )
+    (root / ".bash_history").write_text(
+        "custom-client --port 2222 --target 'alice@[::1]'\n"
+        "custom-client --target only-in-history\n"
+        "custom-client --port 65536 --target invalid\n",
+        encoding="utf-8",
+    )
+    result = run("--dump")
+    assert set(result.stdout.splitlines()) == {
+        "local",
+        "included",
+        "alice@[::1]:2222",
+        "only-in-history",
+    }, result
+    assert not marker.exists(), "history discovery ran a configured command"
+    default_config.write_text(valid_source, encoding="utf-8")
 
     env["XDG_CONFIG_HOME"] = "relative/settings"
     assert run("--config-path").stdout.strip() == target_path(root / ".config/shui.yml")

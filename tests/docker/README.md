@@ -2,11 +2,15 @@
 
 ## Service recipes
 
+Debian/Ubuntu and Fedora/Rocky fixtures provision native updaters explicitly during image construction. Checks verify native timer activation and security-only policy; they do not run ad-hoc updates. Rust shell fixtures cover DNF/YaST policy preservation, recursive Docker/LXC/QEMU transport, continuation after failures, and manual-update warnings when native automation is unavailable.
+
+Service images also explicitly provision their firewall backend, initially stopped, so invalid-input checks cannot accidentally supply later test dependencies. UFW checks preserve existing outgoing/forwarded rules and the default output policy. Archive tests exercise both declined and approved unknown-file confirmations, including retaining an open file after approval. Guest chroots lack `/proc` and a controlling terminal, so their archives must remain intact.
+
 ```sh
 python3 tests/docker/run.py --services --distro debian --distro fedora --timeout 2400
 ```
 
-This opt-in mode uses privileged containers with private cgroup namespaces, without host networking or host filesystem mounts. Containers and test images are removed on completion or failure. It tests security-update scheduling and execution, real Docker/Podman process execution, journal ingestion/storage limits, archive/cache cleanup, and IPv4/IPv6 firewall traffic through an isolated network namespace. Container storage uses private tmpfs mounts to avoid overlay-on-overlay restrictions; the nested Podman workload disables cgroups because controllers may not be delegated in the test container.
+This opt-in mode uses privileged containers with private cgroup namespaces, without host networking or host filesystem mounts. Containers and test images are removed on completion or failure. It tests native security-update scheduling and policy, real Docker/Podman process execution, journal ingestion/storage limits, archive/cache cleanup, and IPv4/IPv6 firewall traffic through an isolated network namespace. Container storage uses private tmpfs mounts to avoid overlay-on-overlay restrictions; the nested Podman workload disables cgroups because controllers may not be delegated in the test container.
 
 Recursive logging tests run real QEMU guest agents in two nested chroots. A virsh fixture supplies discovery and transport; guest execution and filesystem cleanup use the real agent protocol. This covers nested guest execution and inaccessible-agent reporting, but not full VM boot or libvirt domain discovery. Alpine is excluded because this test mode requires systemd. `--keep` retains resources for debugging.
 
@@ -44,8 +48,8 @@ Images track distribution updates rather than immutable digests so repository/pa
 | Zellij | Create, detach and reattach using preinstalled Zellij, without forcing a session name; startup tips/release notes are disabled |
 | Monitor | Start and quit preinstalled btop without a profile-supplied configuration |
 | Configure key-based auth | Generate a real Ed25519 key through the recipe; accept an empty passphrase for the disposable test key; authenticate with it; reuse without duplicate authorized keys; reject overwriting it; verify every expiry duration, expired-key rejection, renewal and removal of expiry |
-| Install dotfiles | Use configured SSH authentication; copy dotfiles including hidden files; execute a fixture installer and verify its remote result |
-| Configure passwordless sudo | Add the test user to the administrative group, remove fixture privileges, and prove sudo runs as root without a password |
+| Install dotfiles | Use configured SSH authentication; preserve symbolic links without copying external targets; copy hidden files and execute a fixture installer |
+| Configure passwordless sudo | Use the default per-user grant, remove fixture privileges, and prove sudo works without adding the user to an administrative group |
 | Configure SSH-agent sudo | Prove authorized-agent authentication and password fallback, reject missing/untrusted agents, preserve timestamp caching and other users' auth policy; verify package-unavailable handling |
 | Copy terminal definition | Compile a unique system terminfo fixture for the root client, export/copy it through the recipe, verify it appears in the remote user's private database and temporary files are removed |
 

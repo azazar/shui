@@ -8,7 +8,7 @@ Run `shui --config-path` to print the active path. Use `shui --check-config` (or
 
 Configuration examples and editing guidance live in the comments of the shipped config, available through F9.
 
-Each profile needs a unique `name` and a `command`; `default` names one of them. Commands run through local `sh -c`, and additional string fields can hold reusable commands or scripts. **Placeholders are shell-escaped automatically—leave them unquoted.**
+Each profile needs a unique `name` and a `command`; `default` names one of them. The default interpreter is local `sh -c`; the bundled client profiles use `shell: direct`. Additional string fields can hold reusable commands or scripts. **Placeholders are shell-escaped automatically—leave them unquoted.**
 
 ## Included profiles
 
@@ -25,7 +25,7 @@ Profiles appear only when their local clients are available. Alongside SSH, Mosh
 | Tunnel | Opens a dialog for `local port:destination host:port`, default `8080:localhost:80`. The destination is resolved/reached from the SSH server. |
 | SOCKS | Opens a dialog for the local proxy port, default `1080`. Configure your client to use SOCKS5 at `127.0.0.1:1080`, with proxy-side DNS when desired. |
 
-Profiles launch the named client or remote application without installing software, downloading executables, or replacing configuration files. Monitor uses your btop configuration; Zellij uses your configuration without forcing a session name, with startup tips and release notes disabled through command-line options.
+Profiles launch the named client or remote application. Monitor uses your btop configuration; Zellij can use a verified temporary download for that session. Neither rewrites your configuration. Zellij leaves session selection to the application, with startup tips and release notes disabled for the launch.
 
 Both forwarding profiles bind only to `127.0.0.1`, remain in the foreground, and stop with Ctrl+C. They request no remote shell, fail if the listening socket cannot be created, and use SSH keepalives to detect a lost connection. A successful listener does not guarantee the destination service is reachable; the SSH server must allow forwarding. Use Alt+Enter in the dialog to return to the menu when the tunnel stops. Explicit SSH ports and alias settings work as in the other profiles.
 
@@ -51,7 +51,9 @@ SSH and forwarding profiles require local SSH; MC requires local MC and SSH; SFT
 
 `prepare_command` is an optional local shell command run with the terminal restored before host setup, connection launch, or history writes. It supports target placeholders and named fields, but not dialog inputs. Exit 0 continues; cancellation, failure or failure to start returns to the menu without launching or recording a connection. It runs only for launch profiles, including shortcuts and one-off connections; it does not run when opening the menu or configuring a host.
 
-No shipped profile uses `prepare_command`; it remains available for explicit custom workflows. Customization examples live in [optional examples](config.optional.yml).
+Use `prepare_remote` for checks or temporary setup that must share the SSH session with the application. It is a literal POSIX shell script. The launch command must use `%{remote}`: Shui runs the setup with `sh` and `set -e`, then runs `remote` in that shell. Zellij uses this to find or temporarily download the binary. Neither preparation step is copied into history. When `prepare_remote` is set, Shui records the command after the client exits successfully; a failed check or session writes nothing.
+
+An ordinary profile writes its `command` as a single Bash history line. `shell: direct` records the executable and its shell-quoted arguments, including `port_args`. For a compound or multiline local launcher or a PowerShell script, set `usage_command` to the equivalent single-line client command for a prepared host (for example `my-client %t`). It uses direct argument quoting and the profile’s `port_args`. Without a Bash representation, the connection still runs and Shui reports that it could not record it. Use `%h` and the explicit port, or `%t`, to preserve the destination. Shui generates anchored matching patterns from this same template; there is no separate regexp to maintain. Connection dialogs do not write history.
 
 ## Profile availability
 

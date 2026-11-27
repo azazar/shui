@@ -27,8 +27,6 @@ fn config_path_with_base(home: &Path, base: Option<&Path>) -> PathBuf {
 pub const DEFAULT_CONFIG: &str = include_str!(concat!(env!("OUT_DIR"), "/config.yml"));
 const HISTORY_TARGET: &str = " # shui-target=";
 const LEGACY_HISTORY_TARGET: &str = " # ssh-menu-target=";
-const SCRIPT_PREFIX: &str = "exec sh -c \"$(printf '%b' ";
-const SCRIPT_SUFFIX: &str = ")\"";
 const BACKGROUND_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_CONFIG_SIZE: usize = 1024 * 1024;
 
@@ -618,12 +616,24 @@ pub struct Profile {
     #[serde(default)]
     pub prepare_command: Option<String>,
     #[serde(default)]
+    pub prepare_remote: Option<String>,
+    #[serde(default)]
+    pub usage_command: Option<String>,
+    #[serde(default)]
     pub prepare_shell: Option<Shell>,
     #[serde(default)]
     pub inputs: Vec<Input>,
     #[serde(flatten)]
     pub fields: HashMap<String, String>,
 }
+
+#[derive(Clone, Copy, PartialEq)]
+enum Template<'a> {
+    Field,
+    Command(Shell, Option<&'a str>),
+    Usage(Shell),
+}
+
 impl Profile {
     pub fn is_available(&self) -> bool {
         let Some(command) = &self.available_command else {
@@ -637,9 +647,16 @@ impl Profile {
         text: &str,
         target: &Target,
         stack: &mut Vec<String>,
-        short: bool,
+        template: Template<'_>,
         inputs: &HashMap<String, String>,
     ) -> io::Result<String> {
+        let (shell, prepare_remote) = match template {
+            Template::Field => (None, None),
+            Template::Command(shell, setup) => (Some(shell), setup),
+            Template::Usage(shell) => (Some(shell), None),
+        };
+        let short = shell.is_some();
+        let mut needs_remote = prepare_remote.is_some();
         if text.len() > 65536 {
             return Err(invalid("expanded command exceeds 64 KiB"));
         }
@@ -665,7 +682,16 @@ impl Profile {
         let mut chars = text.chars().peekable();
         let mut quote = None;
         while let Some(c) = chars.next() {
-            if c == '\\' && quote != Some('\'') && !(short && self.shell == Shell::Powershell) {
+            if template == Template::Usage(Shell::Sh)
+                && quote.is_none()
+                && matches!(c, ';' | '|' | '&')
+            {
+                return Err(invalid(format!(
+                    "{}: move shell preparation out of command or set usage_command",
+                    self.name
+                )));
+            }
+            if c == '\\' && quote != Some('\'') && shell != Some(Shell::Powershell) {
                 result.push(c);
                 if let Some(next) = chars.next() {
                     result.push(next);
@@ -762,10 +788,17 @@ impl Profile {
                             .fields
                             .get(&key)
                             .ok_or_else(|| invalid(format!("unknown field: {key}")))?;
+                        let setup = prepare_remote.filter(|_| key == "remote");
                         stack.push(key);
-                        let value = self.expand(field, target, stack, false, inputs)?;
+                        let value = self.expand(field, target, stack, Template::Field, inputs)?;
                         stack.pop();
-                        value
+                        if let Some(setup) = setup {
+                            needs_remote = false;
+                            let script = format!("set -e\n{setup}\n{value}");
+                            format!("sh -c {}", shell_words::quote(&script))
+                        } else {
+                            value
+                        }
                     }
                 }
                 _ => {
@@ -778,7 +811,7 @@ impl Profile {
                     "placeholders must be unquoted; they are shell-escaped automatically",
                 ));
             }
-            if short && self.shell == Shell::Powershell {
+            if shell == Some(Shell::Powershell) {
                 result.push_str(&format!("'{}'", value.replace('\'', "''")));
             } else {
                 result.push_str(&shell_words::quote(&value));
@@ -790,18 +823,23 @@ impl Profile {
         if short && quote.is_some() {
             return Err(invalid("unclosed quote in command"));
         }
+        if needs_remote {
+            return Err(invalid(
+                "prepare_remote requires %{remote} in the launch command",
+            ));
+        }
         if result.len() > 65536 {
             return Err(invalid("expanded command exceeds 64 KiB"));
         }
         Ok(result)
     }
-    pub fn expanded(&self, target: &Target) -> io::Result<String> {
+    fn expanded(&self, target: &Target, inputs: &HashMap<String, String>) -> io::Result<String> {
         self.expand(
             &self.command,
             target,
             &mut Vec::new(),
-            true,
-            &self.input_defaults(),
+            Template::Command(self.shell, self.prepare_remote.as_deref()),
+            inputs,
         )
     }
     pub fn input_defaults(&self) -> HashMap<String, String> {
@@ -821,20 +859,21 @@ impl Profile {
                 .ok_or_else(|| invalid(format!("missing input: {}", input.id)))?;
             input.validate_value(value)?;
         }
-        self.build_command(
-            self.expand(&self.command, target, &mut Vec::new(), true, values)?,
-            target,
-        )
+        self.build_command(self.shell, self.expanded(target, values)?, target)
     }
     pub fn prepare(&self, target: &Target) -> io::Result<Option<(String, Vec<String>)>> {
         self.prepare_command
             .as_ref()
             .map(|command| {
-                let mut preparer = self.clone();
-                preparer.shell = self.prepare_shell.unwrap_or(self.shell);
-                preparer
-                    .expand(command, target, &mut Vec::new(), true, &HashMap::new())
-                    .and_then(|code| preparer.shell.command(code))
+                let shell = self.prepare_shell.unwrap_or(self.shell);
+                let code = self.expand(
+                    command,
+                    target,
+                    &mut Vec::new(),
+                    Template::Command(shell, None),
+                    &HashMap::new(),
+                )?;
+                shell.command(code)
             })
             .transpose()
     }
@@ -844,60 +883,78 @@ impl Profile {
         words.get(i).cloned().unwrap_or_default()
     }
     pub fn normalize_target(&self, target: &Target, users: &HashMap<String, String>) -> Target {
-        // These clients do not apply OpenSSH's User directives. An explicit
-        // username must not be dropped based on another client's configuration.
-        if matches!(
-            self.program().as_str(),
-            "dbclient" | "putty" | "putty.exe" | "plink" | "plink.exe"
-        ) {
-            target.clone()
-        } else {
-            crate::ssh_config::normalize_target(target, users)
-        }
+        target.for_client(&self.program(), users)
     }
     pub fn command(&self, target: &Target) -> io::Result<(String, Vec<String>)> {
-        self.build_command(self.expanded(target)?, target)
+        self.build_command(
+            self.shell,
+            self.expanded(target, &self.input_defaults())?,
+            target,
+        )
     }
-    fn build_command(&self, code: String, target: &Target) -> io::Result<(String, Vec<String>)> {
-        if self.shell == Shell::Sh {
-            return Ok(Self::shell_command(code));
-        }
-        let (program, mut args) = self.shell.command(code)?;
-        if let Some(port) = &target.port {
+    fn build_command(
+        &self,
+        shell: Shell,
+        code: String,
+        target: &Target,
+    ) -> io::Result<(String, Vec<String>)> {
+        // Keep multiline scripts lossless on Windows sh builds that read argv in the ANSI code page.
+        #[cfg(windows)]
+        let code = if shell == Shell::Sh && code.contains(['\r', '\n']) && !code.is_ascii() {
+            let bytes: String = code.bytes().map(|b| format!("\\0{b:03o}")).collect();
+            format!("exec sh -c \"$(printf '%b' '{bytes}')\"")
+        } else {
+            code
+        };
+        let (program, mut args) = shell.command(code)?;
+        if shell == Shell::Direct
+            && let Some(port) = &target.port
+        {
             let port_args = self.port_args.iter().map(|arg| arg.replace("%p", port));
             args.splice(0..0, port_args);
         }
         Ok((program, args))
     }
-    fn shell_command(command: String) -> (String, Vec<String>) {
-        // Keep scripts on one history line without sending the script through terminal stdin.
-        let code = if command.contains(['\n', '\r']) {
-            // Older /bin/sh implementations can reparse quotes and braces in
-            // nested command substitutions. An octal payload has no shell
-            // syntax and preserves every UTF-8 byte through printf %b.
-            let escaped: String = command
-                .bytes()
-                .map(|byte| format!("\\0{byte:03o}"))
-                .collect();
-            format!(
-                "{SCRIPT_PREFIX}{}{SCRIPT_SUFFIX}",
-                shell_words::quote(&escaped)
-            )
-        } else {
-            command
-        };
-        ("sh".into(), vec!["-c".into(), code])
-    }
     pub fn history_line(&self, target: &Target) -> io::Result<String> {
-        let (program, args) = self.command(target)?;
-        // Preserve the existing single-line history encoding for multiline
-        // arguments. This is a record only: native launches still bypass sh.
-        let mut code = shell_words::join(std::iter::once(program).chain(args));
-        if code.contains(['\n', '\r']) {
-            let (program, args) = Self::shell_command(code);
-            code = shell_words::join(std::iter::once(program).chain(args));
+        let line = self.usage_line(target)?;
+        if line.is_empty() || line.chars().any(char::is_control) {
+            return Err(invalid(format!(
+                "{} needs a single-line usage_command for history",
+                self.name
+            )));
         }
-        Ok(format!("exec {code}{HISTORY_TARGET}{}", target.label()))
+        Ok(line)
+    }
+    pub(super) fn usage_line(&self, target: &Target) -> io::Result<String> {
+        let (template, shell) = match &self.usage_command {
+            Some(usage) => (usage, Shell::Direct),
+            None => (&self.command, self.shell),
+        };
+        let code = self.expand(
+            template,
+            target,
+            &mut Vec::new(),
+            Template::Usage(shell),
+            &HashMap::new(),
+        )?;
+        let line = match shell {
+            Shell::Direct => {
+                let (program, args) = self.build_command(shell, code, target)?;
+                shell_words::join(std::iter::once(program).chain(args))
+            }
+            Shell::Sh => code
+                .trim()
+                .strip_prefix("exec ")
+                .unwrap_or(code.trim())
+                .to_owned(),
+            Shell::Powershell => {
+                return Err(invalid(format!(
+                    "{} needs a Bash usage_command for history",
+                    self.name
+                )));
+            }
+        };
+        Ok(line)
     }
 }
 
@@ -906,6 +963,7 @@ pub fn history_target_hint(line: &str) -> Option<&str> {
 }
 
 fn split_history_hint(line: &str) -> Option<(&str, &str)> {
+    line.strip_prefix("exec ")?;
     line.rsplit_once(HISTORY_TARGET)
         .or_else(|| line.rsplit_once(LEGACY_HISTORY_TARGET))
 }
@@ -921,38 +979,6 @@ pub fn history_words(line: &str) -> Option<Vec<String>> {
         }
         if words.len() == 3 && words[0] == "sh" && words[1] == "-c" {
             code = words[2].clone();
-            if let Some(encoded) = code
-                .strip_prefix(SCRIPT_PREFIX)
-                .and_then(|s| s.strip_suffix(SCRIPT_SUFFIX))
-            {
-                let pieces = shell_words::split(encoded).ok()?;
-                if pieces.len() != 1 {
-                    return None;
-                }
-                let mut chars = pieces[0].chars();
-                let mut decoded = Vec::new();
-                while let Some(c) = chars.next() {
-                    if c != '\\' {
-                        let mut buffer = [0; 4];
-                        decoded.extend_from_slice(c.encode_utf8(&mut buffer).as_bytes());
-                        continue;
-                    }
-                    decoded.push(match chars.next()? {
-                        'n' => b'\n',
-                        'r' => b'\r',
-                        '\\' => b'\\',
-                        '0' => {
-                            let digits: String = chars.by_ref().take(3).collect();
-                            if digits.len() != 3 {
-                                return None;
-                            }
-                            u8::from_str_radix(&digits, 8).ok()?
-                        }
-                        _ => return None,
-                    });
-                }
-                code = String::from_utf8(decoded).ok()?;
-            }
         } else {
             return Some(words);
         }
@@ -978,6 +1004,8 @@ pub struct Config {
     #[serde(default)]
     pub keybindings: crate::bindings::Bindings,
     pub profiles: Vec<Profile>,
+    #[serde(skip)]
+    pub history: crate::history::Patterns,
     #[serde(default)]
     pub configuration_scripts: Vec<Profile>,
 }
@@ -986,7 +1014,7 @@ impl Config {
         if text.len() > MAX_CONFIG_SIZE {
             return Err(invalid("configuration exceeds 1 MiB"));
         }
-        let config: Self = serde_yaml_ng::from_str(text).map_err(|e| invalid(e.to_string()))?;
+        let mut config: Self = serde_yaml_ng::from_str(text).map_err(|e| invalid(e.to_string()))?;
         config
             .keybindings
             .validate(&config.profiles)
@@ -994,13 +1022,14 @@ impl Config {
         if config.profiles.is_empty() {
             return Err(invalid("profiles must not be empty"));
         }
-        if config
-            .configuration_scripts
-            .iter()
-            .any(|p| p.key.is_some() || p.prepare_command.is_some())
-        {
+        if config.configuration_scripts.iter().any(|p| {
+            p.key.is_some()
+                || p.prepare_command.is_some()
+                || p.prepare_remote.is_some()
+                || p.usage_command.is_some()
+        }) {
             return Err(invalid(
-                "key and prepare_command are supported only in launch profiles",
+                "key, prepare_command, prepare_remote and usage_command are supported only in launch profiles",
             ));
         }
         let mut keys = HashSet::new();
@@ -1014,6 +1043,18 @@ impl Config {
         for group in [&config.profiles, &config.configuration_scripts] {
             let mut names = HashSet::new();
             for profile in group {
+                if let Some(setup) = &profile.prepare_remote
+                    && (setup.trim().is_empty() || setup.contains('\0'))
+                {
+                    return Err(invalid(
+                        "prepare_remote must be nonempty and contain no NUL",
+                    ));
+                }
+                if let Some(usage) = &profile.usage_command
+                    && (usage.trim().is_empty() || usage.chars().any(char::is_control))
+                {
+                    return Err(invalid("usage_command must be a single nonempty command"));
+                }
                 if profile
                     .available_command
                     .as_ref()
@@ -1032,11 +1073,13 @@ impl Config {
                         "prepare_command must be nonempty and contain no NUL",
                     ));
                 }
-                if (!profile.port_args.is_empty() && profile.shell != Shell::Direct)
+                if (!profile.port_args.is_empty()
+                    && profile.shell != Shell::Direct
+                    && profile.usage_command.is_none())
                     || profile.port_args.iter().any(|arg| arg.contains('\0'))
                 {
                     return Err(invalid(
-                        "port_args require shell: direct and must not contain NUL",
+                        "port_args require a direct command or usage_command and must not contain NUL",
                     ));
                 }
                 let mut ids = HashSet::new();
@@ -1063,22 +1106,24 @@ impl Config {
                     ));
                 }
                 for port in [None, Some("2222".into())] {
-                    profile.prepare(&Target {
+                    let target = Target {
                         host: "user@host".into(),
-                        port: port.clone(),
-                    })?;
+                        port,
+                    };
+                    profile.prepare(&target)?;
                     profile
-                        .expanded(&Target {
-                            host: "user@host".into(),
-                            port,
-                        })
+                        .expanded(&target, &profile.input_defaults())
                         .map_err(|e| invalid(format!("profile {}: {e}", profile.name)))?;
+                    if profile.usage_command.is_some() {
+                        profile.history_line(&target)?;
+                    }
                 }
             }
         }
         if !config.profiles.iter().any(|p| p.name == config.default) {
             return Err(invalid("default must name an existing profile"));
         }
+        config.history = crate::history::Patterns::new(&config.profiles)?;
         Ok(config)
     }
     fn available_profiles(mut self) -> io::Result<Self> {
@@ -1135,88 +1180,61 @@ impl Config {
         users: &HashMap<String, String>,
     ) -> Vec<usize> {
         let mut selected = vec![self.default_index(); targets.len()];
-        let indices: HashMap<_, _> = targets
+        let mut remaining: HashMap<_, _> = targets
             .iter()
             .enumerate()
             .map(|(i, t)| (t.label(), i))
             .collect();
-        let mut invocations: HashMap<Vec<String>, Option<(usize, usize)>> = HashMap::new();
-        for (i, target) in targets.iter().enumerate() {
-            let mut variants = vec![target.clone()];
-            if !target.host.contains('@')
-                && let Some(login) = users.get(&target.host)
-            {
-                variants.push(Target {
-                    host: format!("{login}@{}", target.host),
-                    port: target.port.clone(),
-                });
+        for line in history.lines().rev() {
+            if remaining.is_empty() {
+                break;
             }
-            for target in &variants {
-                for (p, profile) in self.profiles.iter().enumerate() {
-                    let Some(words) = profile
-                        .history_line(target)
-                        .ok()
-                        .and_then(|line| history_words(&line))
-                    else {
-                        continue;
-                    };
-                    invocations
-                        .entry(words)
-                        .and_modify(|v| {
-                            if v.is_some_and(|(host, _)| host != i) {
-                                *v = None;
-                            }
-                        })
-                        .or_insert(Some((i, p)));
+            let Some(entry) = crate::HistoryEntry::parse(line, user, &self.history) else {
+                continue;
+            };
+            let label = entry.list_target(users).label();
+            let Some(&i) = remaining.get(&label) else {
+                continue;
+            };
+            let crate::HistoryEntry {
+                target,
+                words,
+                profile,
+            } = entry;
+            let profile = if let Some(name) = profile {
+                self.profiles
+                    .iter()
+                    .position(|profile| profile.name == name)
+            } else if let Some((_, remote, program)) = crate::history_connection(&words, user) {
+                if program == "ssh-copy-id" {
+                    continue;
                 }
-            }
-        }
-        for line in history.lines() {
-            let Some(words) = history_words(line) else {
-                continue;
-            };
-            if let Some(Some((i, p))) = invocations.get(&words) {
-                selected[*i] = *p;
-                continue;
-            }
-            if let Some(hint) = history_target_hint(line) {
-                if let Some(target) = crate::target(hint, user) {
-                    let target = crate::ssh_config::normalize_target(&target, users);
-                    if let Some(i) = indices.get(&target.label()) {
-                        selected[*i] = self.default_index();
-                    }
-                }
-                continue;
-            }
-            let Some((target, remote, program)) = crate::history_connection(line, user) else {
-                continue;
-            };
-            let target = crate::ssh_config::normalize_target(&target, users);
-            let Some(i) = indices.get(&target.label()) else {
-                continue;
-            };
-            if !matches!(program.as_str(), "ssh" | "mosh") {
-                continue;
-            }
-            selected[*i] = self
-                .profiles
-                .iter()
-                .position(|profile| {
+                self.profiles.iter().position(|profile| {
                     if profile.program() != program {
                         return false;
                     }
                     if remote.is_empty() {
                         return !profile.fields.contains_key("remote")
-                            && profile.command.trim_end().ends_with("%h");
+                            && (profile.command.trim_end().ends_with("%h") || program == "mc");
                     }
                     // Conventional named remote command supports ordinary manually entered SSH history.
                     profile.fields.get("remote").is_some_and(|field| {
                         profile
-                            .expand(field, &target, &mut Vec::new(), false, &HashMap::new())
+                            .expand(
+                                field,
+                                &target,
+                                &mut Vec::new(),
+                                Template::Field,
+                                &HashMap::new(),
+                            )
                             .is_ok_and(|expected| remote.join(" ") == expected)
                     })
                 })
-                .unwrap_or(self.default_index());
+            } else {
+                None
+            };
+            selected[i] = profile.unwrap_or(self.default_index());
+            remaining.remove(&label);
         }
         selected
     }
@@ -1395,6 +1413,8 @@ mod tests {
                 shell: Shell::Sh,
                 port_args: vec![],
                 prepare_command: None,
+                prepare_remote: None,
+                usage_command: None,
                 prepare_shell: None,
                 inputs: vec![],
                 fields: HashMap::new(),
@@ -1429,10 +1449,10 @@ mod tests {
     fn old_project_history_hints_remain_readable() {
         let config = Config::parse(DEFAULT_CONFIG).unwrap();
         let target = target(Some("2222"));
-        let line = config.profiles[2].history_line(&target).unwrap();
+        let line = "exec sh -c 'mc /sh://alice@host:2222/' # shui-target=alice@host:2222";
         let old_line = line.replace(HISTORY_TARGET, LEGACY_HISTORY_TARGET);
         assert_eq!(history_target_hint(&old_line), Some("alice@host:2222"));
-        assert_eq!(history_words(&line), history_words(&old_line));
+        assert_eq!(history_words(line), history_words(&old_line));
         assert_eq!(config.history_profiles(&[target], &old_line, "me"), [2]);
     }
 
@@ -1477,35 +1497,26 @@ mod tests {
             String::from_utf8(out.stdout).unwrap(),
             "spaces ' quotes\n${literal%% *}\n"
         );
-        let line = config.profiles[0].history_line(&target(None)).unwrap();
-        assert!(!line.contains('\n'));
-        assert_eq!(config.history_profiles(&[target(None)], &line, "me"), [0]);
+        assert!(config.profiles[0].history_line(&target(None)).is_err());
     }
     #[test]
-    fn multiline_transport_preserves_braces_unicode_and_legacy_history() {
+    fn multiline_shell_commands_preserve_braces_and_utf8() {
         let script = "printf '%s\\n' 'café {one,two}'\nprintf '%s\\n' '\"quotes\" and \\slashes'\n";
-        let (program, args) = Profile::shell_command(script.into());
+        let mut config =
+            Config::parse("default: Test\nprofiles: [{name: Test, command: 'true'}]").unwrap();
+        config.profiles[0].command = script.into();
+        let (program, args) = config.profiles[0].command(&target(None)).unwrap();
         let output = Command::new(&program).args(&args).output().unwrap();
         assert!(output.status.success());
         assert_eq!(
             String::from_utf8(output.stdout).unwrap(),
             "café {one,two}\n\"quotes\" and \\slashes\n"
         );
-        let line = shell_words::join(std::iter::once(program).chain(args));
-        assert!(!line.contains('\n'));
-        assert_eq!(
-            history_words(&line),
-            Some(shell_words::split(script).unwrap())
-        );
-        let legacy = format!("{SCRIPT_PREFIX}'printf old\\n'{SCRIPT_SUFFIX}");
-        assert_eq!(
-            history_words(&shell_words::join(["sh", "-c", &legacy])),
-            Some(vec!["printf".into(), "old".into()])
-        );
     }
     #[test]
     fn optional_ports_use_ordinary_shell_syntax() {
         let config = Config::parse("default: Test\nprofiles:\n  - name: Test\n    command: port=%p; printf '%s\\n' ${port:+-p \"$port\"} -- %h\n").unwrap();
+        assert!(config.profiles[0].history_line(&target(None)).is_err());
         assert_eq!(
             String::from_utf8(run(&config.profiles[0], &target(None)).stdout).unwrap(),
             "--\nalice@host\n"
@@ -1516,23 +1527,112 @@ mod tests {
         );
     }
     #[test]
+    fn remote_preparation_gates_the_same_command_that_history_records() {
+        let config = Config::parse(
+            r#"default: Work
+profiles:
+  - name: Work
+    shell: direct
+    command: sh -c %{remote} -- %h
+    prepare_remote: workdir=prepared
+    remote: 'printf "%s" "$workdir"'
+"#,
+        )
+        .unwrap();
+        let mut profile = config.profiles[0].clone();
+        let target = target(None);
+        let output = run(&profile, &target);
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"prepared");
+        assert_eq!(
+            profile.history_line(&target).unwrap(),
+            "sh -c 'printf \"%s\" \"$workdir\"' -- alice@host"
+        );
+        profile.prepare_remote = Some("exit 7".into());
+        let failed = run(&profile, &target);
+        assert_eq!(failed.status.code(), Some(7));
+        assert!(failed.stdout.is_empty());
+    }
+    #[test]
     fn default_profiles_history_round_trip() {
-        let windows = crate::config_defaults::defaults(true, false).unwrap();
-        for source in [DEFAULT_CONFIG, windows.as_str()] {
-            let config = Config::parse(source).unwrap();
-            for (index, profile) in config.profiles.iter().enumerate() {
-                let target = target(Some("2222"));
-                let line = profile.history_line(&target).unwrap();
-                assert!(!line.contains('\n'));
+        for windows in [false, true] {
+            let config =
+                Config::parse(&crate::config_defaults::defaults(windows, false).unwrap()).unwrap();
+            for (index, profile) in config
+                .profiles
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.inputs.is_empty())
+            {
+                for port in [None, Some("2222")] {
+                    let target = target(port);
+                    let line = profile.history_line(&target).unwrap();
+                    let port = port.map(|p| format!(" -p {p}")).unwrap_or_default();
+                    match profile.name.as_str() {
+                        "SSH" => assert_eq!(line, format!("ssh{port} -- alice@host")),
+                        "Zellij" => {
+                            assert_eq!(
+                                line,
+                                format!(
+                                    "ssh{port} -tt -- alice@host 'zellij attach --create options --show-startup-tips false --show-release-notes false'"
+                                )
+                            )
+                        }
+                        _ => assert_eq!(history_words(&line).unwrap()[0], profile.program()),
+                    }
+                    assert!(!line.contains(['\n', '\r', '#']));
+                    assert_eq!(
+                        config.history_profiles(std::slice::from_ref(&target), &line, "me"),
+                        [index]
+                    );
+                    assert_eq!(
+                        crate::HistoryEntry::parse(&line, "me", &config.history)
+                            .unwrap()
+                            .target,
+                        target
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn custom_history_captures_repeated_targets_and_quotes_literal_arguments() {
+        let config = Config::parse("default: SSH\nprofiles:\n  - {name: SSH, command: 'ssh %h'}\n  - name: Work\n    shell: direct\n    command: custom-connect %h %t %{note}\n    note: literal .* ; $HOME\n    prepare_command: 'false'\n  - name: PS\n    shell: powershell\n    command: Invoke-Work %t\n    usage_command: custom-ps %h\n    port_args: ['--port', '%p']\n").unwrap();
+        for (host, port) in [("alice@host", None), ("alice@[::1]", Some("2222"))] {
+            let target = Target {
+                host: host.into(),
+                port: port.map(str::to_owned),
+            };
+            for index in [1, 2] {
+                let line = config.profiles[index].history_line(&target).unwrap();
+                if index == 2 && port.is_some() {
+                    assert_eq!(
+                        shell_words::split(&line).unwrap(),
+                        ["custom-ps", "--port", "2222", host]
+                    );
+                    assert_eq!(
+                        config.profiles[index].command(&target).unwrap().1[0],
+                        "-NoLogo"
+                    );
+                }
+                let entry = crate::HistoryEntry::parse(&line, "", &config.history).unwrap();
+                assert_eq!(entry.target, target);
+                assert_eq!(entry.profile, Some(config.profiles[index].name.as_str()));
                 assert_eq!(
-                    config.history_profiles(std::slice::from_ref(&target), &line, "me"),
+                    config.history_profiles(std::slice::from_ref(&target), &line, ""),
                     [index]
                 );
-                assert_eq!(
-                    crate::history_target(&line, "me").unwrap().label(),
-                    target.label()
-                );
             }
+        }
+        for line in [
+            "custom-connect first second 'literal .* ; $HOME'",
+            "custom-connect first first 'literal oops ; $HOME'",
+            "custom-ps host:65536",
+        ] {
+            assert!(
+                crate::HistoryEntry::parse(line, "", &config.history).is_none(),
+                "{line}"
+            );
         }
     }
     #[test]
@@ -1617,6 +1717,8 @@ mod tests {
     fn invalid_templates_fail_without_executing() {
         for profile in [
             "{name: X, command: ''}",
+            "{name: X, command: 'ssh %h %%{remote}', remote: true-command, prepare_remote: false-command}",
+            "{name: X, command: 'ssh %h', usage_command: 'client %{missing}'}",
             "{name: X, command: 'true', prepare_command: ''}",
             "{name: X, command: 'true', prepare_command: 'echo %{missing}'}",
             "{name: X, command: 'true', prepare_command: 'echo %{input:x}', inputs: [{id: x, type: promptString, default: test}]}",

@@ -39,7 +39,15 @@ def available(tool):
 
 
 def interactive(
-    name, command, *, consent="y", finish=None, expected=0, timeout=600, user=None
+    name,
+    command,
+    *,
+    consent="y",
+    archive_consent="n",
+    finish=None,
+    expected=0,
+    timeout=600,
+    user=None,
 ):
     """Respond only to known fixture/password/install prompts; preserve a real tty."""
     master, slave = pty.openpty()
@@ -81,6 +89,11 @@ def interactive(
             False,
         ),
         (re.compile(r"(?i)Install[^\r\n]*\[y/n\]"), (consent + "\n").encode(), True),
+        (
+            re.compile(r"Delete this unknown rotated log\? \[y/N\]:"),
+            (archive_consent + "\n").encode(),
+            False,
+        ),
         (
             re.compile(
                 r"(?i)(?:Do you want|Proceed|Is this ok|Continue)[^\r\n]*\[[^\]\r\n]*[yn][^\]\r\n]*\](?:[^\r\n]*:)?"
@@ -330,12 +343,19 @@ def run():
         )
         (dotfiles / ".fixture").write_text("hidden file copied intact\n")
         (dotfiles / "expected").write_bytes((dotfiles / ".fixture").read_bytes())
+        outside = Path("/root/dotfiles-outside")
+        outside.mkdir()
+        (outside / "secret").write_text("must not be uploaded\n")
+        (dotfiles / "outside-link").symlink_to(outside)
         script("dotfiles")
         assert (
             remote('cat "$HOME/.dotfiles-installed"').stdout.strip()
             == "dotfiles-installed"
         )
         remote('test -f "$HOME/src/dotfiles/.fixture"')
+        remote(
+            'test -L "$HOME/src/dotfiles/outside-link"; test ! -f "$HOME/src/dotfiles/outside-link/secret"'
+        )
 
         definition = Path("/tests/fixture.terminfo")
         definition.write_text(
@@ -541,8 +561,6 @@ def run():
             for name in agent_env:
                 os.environ.pop(name, None)
         script("sudo-nopasswd")
-        group = "sudo" if distro in ("debian", "ubuntu") else "wheel"
-        subprocess.run(["usermod", "-aG", group, "remote"], check=True)
         Path("/etc/sudoers.d/shui-test").unlink()
         assert remote("sudo -k; sudo -n id -u").stdout.strip() == "0"
         script("sudo-nopasswd-repeat", "sudo-nopasswd")

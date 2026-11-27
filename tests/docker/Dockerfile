@@ -7,10 +7,11 @@ COPY bootstrap.sh /tests/bootstrap.sh
 RUN sh /tests/bootstrap.sh "$DISTRO"
 RUN if [ "$SERVICE_TESTS" = 1 ]; then \
       case "$DISTRO" in \
-        debian|ubuntu) apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y systemd systemd-sysv dbus iproute2 qemu-guest-agent libvirt-daemon-log crun ;; \
-        fedora|rocky) dnf install -y systemd dbus iproute qemu-guest-agent libvirt-daemon-log ;; \
-        opensuse) zypper --non-interactive install systemd dbus-1 iproute2 qemu-guest-agent libvirt-daemon-driver-qemu ;; \
-        arch) pacman -S --needed --noconfirm systemd dbus iproute2 qemu-guest-agent libvirt ;; \
+        debian|ubuntu) apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y systemd systemd-sysv dbus iproute2 qemu-guest-agent libvirt-daemon-log crun unattended-upgrades ufw ;; \
+        fedora) dnf install -y systemd dbus iproute qemu-guest-agent libvirt-daemon-log dnf5-plugin-automatic firewalld ;; \
+        rocky) dnf install -y systemd dbus iproute qemu-guest-agent libvirt-daemon-log dnf-automatic firewalld ;; \
+        opensuse) zypper --non-interactive install systemd dbus-1 iproute2 qemu-guest-agent libvirt-daemon-driver-qemu firewalld ;; \
+        arch) pacman -S --needed --noconfirm systemd dbus iproute2 qemu-guest-agent libvirt firewalld ;; \
         *) exit 1 ;; \
       esac; \
     fi

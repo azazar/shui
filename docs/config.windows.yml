@@ -1,52 +1,21 @@
 # Native Windows overrides. No local POSIX shell or Git installation required.
 profiles:
   - name: SSH
-    shell: direct
     available_command: where.exe ssh
-    prepare_command: null
-    command: ssh -- %h
-    port_args: ["-p", "%p"]
   - name: Mosh
-    shell: direct
     available_command: powershell.exe -NoProfile -Command 'Get-Command ssh,mosh -CommandType Application -ErrorAction Stop | Out-Null'
-    command: mosh -- %h
-    port_args: ["--ssh=ssh -p %p"]
   - name: MC
-    shell: direct
     available_command: where.exe mc
-    prepare_command: null
-    command: mc /sh://%t/
-    port_args: []
   - name: Bash
-    shell: direct
     available_command: where.exe ssh
-    prepare_command: null
-    command: ssh -tt -- %h %{remote}
-    port_args: ["-p", "%p"]
   - name: Zellij
-    shell: direct
     available_command: where.exe ssh
-    prepare_command: null
-    command: ssh -tt -- %h %{remote}
-    port_args: ["-p", "%p"]
   - name: Tmux
-    shell: direct
     available_command: where.exe ssh
-    prepare_command: null
-    command: ssh -tt -- %h %{remote}
-    port_args: ["-p", "%p"]
   - name: SFTP
-    shell: direct
     available_command: where.exe sftp
-    prepare_command: null
-    command: sftp -- %h
-    port_args: ["-P", "%p"]
   - name: Monitor
-    shell: direct
     available_command: where.exe ssh
-    prepare_command: null
-    command: ssh -tt -- %h %{remote}
-    port_args: ["-p", "%p"]
   - name: Tunnel
     shell: direct
     available_command: where.exe ssh
@@ -60,11 +29,7 @@ profiles:
     command: ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -D 127.0.0.1:%{input:port} -- %h
     port_args: ["-p", "%p"]
   - name: Dropbear
-    shell: direct
     available_command: where.exe dbclient
-    prepare_command: null
-    command: dbclient -- %h
-    port_args: ["-p", "%p"]
   - name: PuTTY
     shell: direct
     available_command: where.exe putty.exe
@@ -89,7 +54,7 @@ configuration_scripts:
     windows: &windows_helpers |
       $ErrorActionPreference = 'Stop'
       function Invoke-Native {
-        param([string]$Program, [string[]]$Arguments, [AllowNull()]$InputText = $null, [switch]$Capture)
+        param([string]$Program, [string[]]$Arguments, [AllowNull()]$InputText = $null, [string]$InputFile, [switch]$Capture)
         $start = [System.Diagnostics.ProcessStartInfo]::new()
         $start.FileName = $Program
         $start.UseShellExecute = $false
@@ -97,7 +62,7 @@ configuration_scripts:
         $start.Arguments = ($Arguments | ForEach-Object {
           '"' + [regex]::Replace([regex]::Replace($_, '(\\*)"', '$1$1\"'), '(\\+)$', '$1$1') + '"'
         }) -join ' '
-        $start.RedirectStandardInput = $null -ne $InputText
+        $start.RedirectStandardInput = $null -ne $InputText -or $InputFile.Length -gt 0
         $start.RedirectStandardOutput = $Capture
         if ($Capture) { $start.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false) }
         # Avoid a UTF-8 BOM on SSH stdin from .NET Framework's writer.
@@ -109,7 +74,17 @@ configuration_scripts:
           if ($start.RedirectStandardInput) { [Console]::InputEncoding = $previousEncoding }
         }
         try {
-          if ($start.RedirectStandardInput) { $bytes = [System.Text.Encoding]::UTF8.GetBytes($InputText); $process.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length); $process.StandardInput.Close() }
+          if ($start.RedirectStandardInput) {
+            try {
+              if ($InputFile) {
+                $stream = [IO.File]::OpenRead($InputFile)
+                try { $stream.CopyTo($process.StandardInput.BaseStream) } finally { $stream.Dispose() }
+              } else {
+                $bytes = [System.Text.Encoding]::UTF8.GetBytes($InputText)
+                $process.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
+              }
+            } finally { $process.StandardInput.Close() }
+          }
           if ($Capture) { $output = $process.StandardOutput.ReadToEnd() }
           $process.WaitForExit()
           if ($process.ExitCode -ne 0) { throw "$Program exited with status $($process.ExitCode)" }
@@ -169,23 +144,6 @@ configuration_scripts:
         options: [never, 8 hours, day, week, month, year]
         default: never
     command: . ([scriptblock]::Create(%{windows})); & ([scriptblock]::Create(%{setup_windows})) %h %p %{input:key} %{expiry_remote} %{install_key_remote} %{input:new_key}
-    install_key_remote: &install_key_remote sh -c %{install_key}
-    install_key: &install_key |
-      set -eu
-      umask 077
-      mkdir -p "$HOME/.ssh"
-      file="$HOME/.ssh/authorized_keys"
-      test ! -L "$file" || { echo 'Refusing symlinked authorized_keys' >&2; exit 1; }
-      test ! -e "$file" || test -f "$file" || exit 1
-      touch "$file"
-      chmod 600 "$file"
-      IFS= read -r key
-      key=$(printf '%s' "$key" | tr -d '\r')
-      blob=$(printf '%s\n' "$key" | awk '{print $1 " " $2}')
-      test -n "$blob" || exit 1
-      if ! awk -v key="$blob" 'index($0,key) { found=1 } END { exit !found }' "$file"; then
-        printf '\n%s\n' "$key" >> "$file"
-      fi
     setup_windows: &setup_windows |
       param($Destination, $Port, $KeyName, $ExpiryRemote, $InstallKeyRemote, $NewKeyName)
       $ErrorActionPreference = 'Stop'
@@ -198,7 +156,7 @@ configuration_scripts:
       Invoke-Native ssh ($connection + @('-i', $private, '--', $Destination, $ExpiryRemote)) -InputText $key
   - name: Install dotfiles
     shell: powershell
-    available_command: Get-Command ssh,scp -CommandType Application -ErrorAction Stop | Out-Null
+    available_command: Get-Command ssh,tar -CommandType Application -ErrorAction Stop | Out-Null
     windows: *windows_helpers
     setup_dotfiles: |
       param($Destination, $Port, $Source, $Installer, $Remote)
@@ -209,10 +167,13 @@ configuration_scripts:
       if (!(Test-Path -LiteralPath (Join-Path $Source $Installer) -PathType Leaf)) { throw "Missing installer: $Source/$Installer" }
       $connection = @()
       if ($Port) { $connection = @('-p', $Port) }
-      Invoke-Native ssh ($connection + @('--', $Destination, 'mkdir -p "$HOME/src/dotfiles"'))
-      $copy = @()
-      if ($Port) { $copy = @('-P', $Port) }
-      Invoke-Native scp ($copy + @('-r', (Join-Path $Source '.'), ($Destination + ':src/dotfiles/')))
+      $archive = Join-Path ([IO.Path]::GetTempPath()) ('shui-dotfiles-' + [guid]::NewGuid() + '.tar')
+      try {
+        Invoke-Native tar @('-cf', $archive, '-C', $Source, '.')
+        Invoke-Native ssh ($connection + @('--', $Destination, 'set -eu; mkdir -p "$HOME/src/dotfiles"; tar -xf - -C "$HOME/src/dotfiles"')) -InputFile $archive
+      } finally {
+        [IO.File]::Delete($archive)
+      }
       Invoke-Native ssh ($connection + @('-tt', '--', $Destination, $Remote))
     inputs:
       - id: source

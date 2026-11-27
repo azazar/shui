@@ -10,6 +10,7 @@ mod config_defaults;
 mod docker_tests;
 mod editor;
 mod help;
+mod history;
 mod launch;
 mod new_remote;
 #[cfg(all(test, unix))]
@@ -67,6 +68,13 @@ impl Target {
             None => self.host.clone(),
         }
     }
+    fn for_client(&self, program: &str, users: &HashMap<String, String>) -> Self {
+        // These clients do not apply OpenSSH's User directive.
+        match program {
+            "dbclient" | "putty" | "putty.exe" | "plink" | "plink.exe" => self.clone(),
+            _ => ssh_config::normalize_target(self, users),
+        }
+    }
 }
 
 fn display_usernames<'a>(
@@ -111,6 +119,9 @@ fn valid_host(host: &str) -> bool {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "_.-@[]:".contains(c))
 }
+fn parse_port(value: &str) -> Option<&str> {
+    (value.bytes().all(|b| b.is_ascii_digit()) && value.parse::<u16>().ok()? > 0).then_some(value)
+}
 fn target(raw: &str, _user: &str) -> Option<Target> {
     let (host, port) = match raw.rsplit_once(':') {
         Some((h, p))
@@ -118,16 +129,11 @@ fn target(raw: &str, _user: &str) -> Option<Target> {
                 && p.chars().all(|c| c.is_ascii_digit())
                 && (!h.contains(':') || h.ends_with(']')) =>
         {
-            (h, Some(p.to_owned()))
+            (h, Some(parse_port(p)?.to_owned()))
         }
         _ => (raw, None),
     };
-    if host.len() > 1024
-        || !valid_host(host)
-        || port
-            .as_ref()
-            .is_some_and(|value| value.parse::<u16>().ok().filter(|port| *port > 0).is_none())
-    {
+    if host.len() > 1024 || !valid_host(host) {
         return None;
     }
     Some(Target {
@@ -135,51 +141,83 @@ fn target(raw: &str, _user: &str) -> Option<Target> {
         port,
     })
 }
-fn history_target(line: &str, user: &str) -> Option<Target> {
-    if let Some(hint) = launch::history_target_hint(line) {
-        return target(hint, user);
+struct HistoryEntry<'a> {
+    target: Target,
+    words: Vec<String>,
+    profile: Option<&'a str>,
+}
+
+impl<'a> HistoryEntry<'a> {
+    fn parse(line: &str, user: &str, patterns: &'a history::Patterns) -> Option<Self> {
+        let words = launch::history_words(line)?;
+        let (target, profile) = if let Some((dest, name)) = patterns.find(&words, user) {
+            (dest, Some(name))
+        } else if let Some(hint) = launch::history_target_hint(line) {
+            (target(hint, user)?, None)
+        } else {
+            (history_connection(&words, user)?.0, None)
+        };
+        Some(Self {
+            target,
+            words,
+            profile,
+        })
     }
-    let words = launch::history_words(line)?;
-    if let [program, path] = words.as_slice()
+
+    fn list_target(&self, users: &HashMap<String, String>) -> Target {
+        let program = self.words.first().map_or("", String::as_str);
+        self.target.for_client(program, users)
+    }
+}
+
+fn history_connection<'a>(
+    words: &'a [String],
+    user: &str,
+) -> Option<(Target, &'a [String], &'a str)> {
+    if let [program, path] = words
         && program == "mc"
         && let Some(host) = path
             .strip_prefix("/sh://")
             .and_then(|p| p.strip_suffix('/'))
     {
-        return target(host, user);
+        return Some((target(host, user)?, &[], program));
     }
-    history_connection(line, user).map(|(target, _, _)| target)
-}
-
-fn history_connection(line: &str, user: &str) -> Option<(Target, Vec<String>, String)> {
-    let words = launch::history_words(line)?;
-    let mut it = words.iter().map(String::as_str);
-    let cmd = it.next()?;
-    if !matches!(cmd, "ssh" | "ssh-copy-id" | "mosh") {
+    let (cmd, args) = words.split_first()?;
+    if !matches!(cmd.as_str(), "ssh" | "ssh-copy-id" | "mosh") {
         return None;
     }
+    let mut it = args.iter();
     let mut port = None;
     let mut login = None;
     let host = loop {
-        let word = it.next()?;
+        let word = it.next()?.as_str();
         if word == "--" {
-            break it.next()?;
+            break it.next()?.as_str();
         }
-        if word == "-p" {
-            port = Some(it.next()?.to_owned());
-            continue;
-        }
-        if word.starts_with("-p") && word.len() > 2 {
-            port = Some(word[2..].to_owned());
+        if cmd != "mosh"
+            && let Some(value) = word.strip_prefix("-p")
+        {
+            let value = if value.is_empty() { it.next()? } else { value };
+            port = Some(parse_port(value)?.to_owned());
             continue;
         }
         if word == "-l" {
-            login = Some(it.next()?);
+            login = Some(it.next()?.as_str());
             continue;
         }
-        if word == "--ssh" || word.starts_with("--ssh=") {
-            let value = word.strip_prefix("--ssh=").or_else(|| it.next())?;
-            port = history_target(&format!("{value} placeholder"), user).and_then(|t| t.port);
+        if cmd == "mosh" && (word == "--ssh" || word.starts_with("--ssh=")) {
+            let value = word
+                .strip_prefix("--ssh=")
+                .or_else(|| it.next().map(String::as_str))?;
+            let mut ssh = shell_words::split(value).ok()?;
+            if ssh.first().is_some_and(|s| s == "ssh") {
+                ssh.push("placeholder".into());
+                port = history_connection(&ssh, user)?.0.port;
+            }
+            continue;
+        }
+        if cmd == "mosh" && matches!(word, "-p" | "--port") {
+            it.next()?;
             continue;
         }
         if matches!(
@@ -209,21 +247,17 @@ fn history_connection(line: &str, user: &str) -> Option<(Target, Vec<String>, St
         break word;
     };
     let mut t = target(host, user)?;
-    if let Some(p) = port {
-        p.parse::<u16>().ok().filter(|p| *p > 0)?;
-        t.port = Some(p);
-    }
+    t.port = port.or(t.port);
     if let Some(login) = login {
         t = target(&format!("{login}@{}", t.label()), user)?;
     }
-    Some((t, it.map(str::to_owned).collect(), cmd.to_owned()))
+    Some((t, it.as_slice(), cmd))
 }
-fn discover(home: &Path, user: &str) -> Vec<Target> {
+fn discover(home: &Path, user: &str, patterns: &history::Patterns) -> Vec<Target> {
     let ssh = ssh_config::load(home, user);
     let mut entries = HashMap::new();
     let mut rank = 0usize;
     let mut add = |t: Target| {
-        let t = ssh_config::normalize_target(&t, &ssh.users);
         rank += 1;
         entries.insert(t.label(), (rank, t));
     };
@@ -240,15 +274,15 @@ fn discover(home: &Path, user: &str) -> Vec<Target> {
             && let Some(rest) = url.strip_prefix("/sh://")
             && let Some(t) = target(rest.split('/').next().unwrap_or(""), user)
         {
-            add(t);
+            add(ssh_config::normalize_target(&t, &ssh.users));
         }
     }
     for line in read_history(&home.join(".bash_history"))
         .unwrap_or_default()
         .lines()
     {
-        if let Some(t) = history_target(line, user) {
-            add(t);
+        if let Some(entry) = HistoryEntry::parse(line, user, patterns) {
+            add(entry.list_target(&ssh.users));
         }
     }
     let mut values: Vec<_> = entries.into_values().collect();
@@ -620,7 +654,7 @@ fn menu(
                         .map(|(target, profile)| (target.label(), *profile))
                         .collect();
                     let user = local_username();
-                    *targets = discover(home, &user);
+                    *targets = discover(home, &user, &config.history);
                     *profiles = config.history_profiles_with_users(
                         targets,
                         &read_history(&home.join(".bash_history")).unwrap_or_default(),
@@ -1010,8 +1044,13 @@ fn run() -> io::Result<()> {
         }
         cli::Action::CheckConfig(None) => return check_config(&launch::config_path(home)),
         cli::Action::Dump => {
+            let source = launch::read_config(&launch::config_path(home));
+            let patterns =
+                launch::Config::parse(source.as_deref().unwrap_or(launch::DEFAULT_CONFIG))
+                    .map(|config| config.history)
+                    .unwrap_or_default();
             let mut stdout = io::stdout().lock();
-            for entry in discover(home, &user) {
+            for entry in discover(home, &user, &patterns) {
                 writeln!(stdout, "{}", entry.label())?;
             }
             return Ok(());
@@ -1026,8 +1065,8 @@ fn run() -> io::Result<()> {
         unreachable!()
     };
     cli::require_terminal(auto_terminal)?;
-    let mut targets = discover(home, &user);
     let mut config = launch::Config::load(home)?;
+    let mut targets = discover(home, &user, &config.history);
     let history = read_history(&home.join(".bash_history")).unwrap_or_default();
     let profiles = config.history_profiles_with_users(
         &targets,
@@ -1116,42 +1155,55 @@ fn run() -> io::Result<()> {
                 continue;
             }
             let custom = connection_command.is_some();
+            let profile = &config.profiles[profile_index];
             let (program, args) = match connection_command {
                 Some(command) => command,
-                None => config.profiles[profile_index].command(&target)?,
+                None => profile.command(&target)?,
             };
-            if !custom {
-                let line = config.profiles[profile_index].history_line(&target)?;
-                if let Err(err) = save_history(&home.join(".bash_history"), &line, new) {
+            let save = || {
+                if let Err(err) = profile
+                    .history_line(&target)
+                    .and_then(|line| save_history(&home.join(".bash_history"), &line, new))
+                {
                     eprintln!("shui: could not save connection history: {err}");
                 }
+            };
+            // Remote preparation and the tool share one SSH session and one exit status.
+            let save_on_success = !custom && profile.prepare_remote.is_some();
+            if !custom && !save_on_success {
+                save();
             }
-            if return_to_menu {
-                state.notice = Some(match Command::new(program).args(args).status() {
-                    Ok(status) if status.success() => {
-                        format!("Connection closed: {}", target.label())
-                    }
-                    Ok(status) => format!("Connection failed ({status}): {}", target.label()),
-                    Err(err) => format!("Connection failed: {err} · {}", target.label()),
-                });
-                if new && !targets.contains(&target) {
-                    targets.insert(0, target);
-                    state.profiles.insert(0, profile_index);
-                    state.query.clear();
-                    state.selection = 0;
-                }
-                continue;
-            }
+            let mut command = Command::new(program);
+            command.args(args);
             #[cfg(unix)]
-            {
+            if !return_to_menu && !save_on_success {
                 use std::os::unix::process::CommandExt;
-                return Err(Command::new(program).args(args).exec());
+                return Err(command.exec());
             }
-            #[cfg(not(unix))]
-            {
-                let status = Command::new(program).args(args).status()?;
-                std::process::exit(status.code().unwrap_or(1));
+            let status = command.status();
+            if save_on_success && status.as_ref().is_ok_and(|s| s.success()) {
+                save();
             }
+            if !return_to_menu {
+                let status = status?;
+                #[cfg(unix)]
+                if let Some(signal) = std::os::unix::process::ExitStatusExt::signal(&status) {
+                    std::process::exit(128 + signal);
+                }
+                std::process::exit(status.code().unwrap_or(1))
+            }
+            state.notice = Some(match status {
+                Ok(status) if status.success() => format!("Connection closed: {}", target.label()),
+                Ok(status) => format!("Connection failed ({status}): {}", target.label()),
+                Err(err) => format!("Connection failed: {err} · {}", target.label()),
+            });
+            if new && !targets.contains(&target) {
+                targets.insert(0, target);
+                state.profiles.insert(0, profile_index);
+                state.query.clear();
+                state.selection = 0;
+            }
+            continue;
         }
         return Ok(());
     }
@@ -1169,6 +1221,10 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn history_target(line: &str, user: &str) -> Option<Target> {
+        Some(HistoryEntry::parse(line, user, &history::Patterns::default())?.target)
+    }
 
     #[test]
     fn keyboard_protocol_matches_the_platform_backend() {
@@ -1295,7 +1351,8 @@ mod tests {
         assert_eq!(t.label(), "alice@example.org:2222");
         for delimiter in ["", "-- "] {
             let line = format!("exec ssh -l bob -p2222 {delimiter}host exec bash -l");
-            let (target, remote, program) = history_connection(&line, "alice").unwrap();
+            let words = launch::history_words(&line).unwrap();
+            let (target, remote, program) = history_connection(&words, "alice").unwrap();
             assert_eq!(target.label(), "bob@host:2222");
             assert_eq!(remote, ["exec", "bash", "-l"]);
             assert_eq!(program, "ssh");
@@ -1305,8 +1362,8 @@ mod tests {
     }
     #[test]
     fn mosh_and_override() {
-        let (t, _, program) =
-            history_connection("mosh --ssh='ssh -p 2200' bob@host", "alice").unwrap();
+        let words = launch::history_words("mosh --ssh='ssh -p 2200' bob@host").unwrap();
+        let (t, _, program) = history_connection(&words, "alice").unwrap();
         assert_eq!(program, "mosh");
         assert_eq!(t.label(), "bob@host:2200");
     }
@@ -1336,7 +1393,7 @@ mod tests {
             "ssh alpha\nmosh beta\nssh alpha\n",
         )
         .unwrap();
-        let ts = discover(&dir, "alice");
+        let ts = discover(&dir, "alice", &history::Patterns::default());
         assert_eq!(ts[0].label(), "alpha");
         assert_eq!(ts[1].label(), "beta");
         assert!(ts.iter().any(|t| t.label() == "bob@mc"));

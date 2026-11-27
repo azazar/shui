@@ -21,6 +21,8 @@ def transport(socket, uuid):
     return f"""#!/usr/bin/python3
 import json, socket, sys
 if 'list' in sys.argv:
+    if 'lxc:///' in sys.argv:
+        sys.exit(0)
     print({uuid!r}); sys.exit(0)
 request = json.loads(sys.argv[-1])
 client = socket.socket(socket.AF_UNIX)
@@ -77,6 +79,8 @@ def rootfs(root, identity):
                 "sed",
                 "awk",
                 "sort",
+                "stat",
+                "grep",
                 "date",
                 "base64",
                 "sleep",
@@ -115,6 +119,7 @@ def rootfs(root, identity):
         for dependency in re.findall(r"(/[\w/+.\-]+)", result.stdout):
             copy_binary(dependency)
     (root / "etc/machine-id").write_text(identity * 32 + "\n")
+    (root / "etc/os-release").write_text("ID=debian\n")
     (root / "etc/passwd").write_text("root:x:0:0:root:/root:/bin/sh\n")
     (root / "etc/group").write_text("root:x:0:\n")
     (root / "etc/nsswitch.conf").write_text("passwd: files\ngroup: files\n")
@@ -178,12 +183,25 @@ def check_guest_recursion():
             assert (
                 root / "var/log/libvirt/qemu/fixture.log"
             ).read_text() == "keep active VM log\n"
-            assert not (root / "var/log/libvirt/qemu/fixture.log.1").exists()
+            # Without /proc or a confirmation terminal, unknown/open-state logs stay.
+            assert (root / "var/log/libvirt/qemu/fixture.log.1").exists()
             assert not (root / "root/.cache/fixture").exists()
             assert (
                 "max_size = 10485760"
                 in (root / "etc/libvirt/virtlogd.conf").read_text()
             )
+        # Real agents must carry the native-setup payload through both levels.
+        # Chroots have no scheduler: warn, do not install one or fail traversal.
+        output, _ = script("security-guests", "security-updates", timeout=600)
+        for uuid in (
+            "00000000-0000-0000-0000-000000000001",
+            "00000000-0000-0000-0000-000000000002",
+        ):
+            assert f"Libvirt qemu:///system {uuid}:" in output
+        assert output.count("Update this system manually") >= 2
+        for root in (outer, inner):
+            assert not (root / "etc/apt").exists()
+            assert not (root / "etc/systemd").exists()
         # An inaccessible agent must produce an incomplete outcome, not success.
         processes[-1].terminate()
         processes[-1].wait(timeout=5)
@@ -191,6 +209,11 @@ def check_guest_recursion():
             "logs-guest-unavailable", "logs-guests", expected=1, timeout=600
         )
         assert "Incomplete log maintenance" in output
+        output, _ = script(
+            "security-guest-unavailable", "security-updates", timeout=600
+        )
+        assert "no accessible guest agent" in output
+        assert "Update affected systems manually" in output
     finally:
         host_transport.unlink()
         for process in processes:

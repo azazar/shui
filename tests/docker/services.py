@@ -1,5 +1,6 @@
 """Behavioral service-recipe tests inside a disposable, booted systemd container."""
 
+import configparser
 import json
 import os
 from pathlib import Path
@@ -166,11 +167,10 @@ def updates():
         "rhel",
         "rocky",
         "almalinux",
-        "opensuse-leap",
-        "sles",
     )
-    script("security-updates", expected=0 if supported else 1)
+    output, _ = script("security-updates")
     if not supported:
+        assert "Update this system manually" in output
         assert (
             subprocess.run(
                 ["systemctl", "is-enabled", "shui-security-updates.timer"],
@@ -179,23 +179,11 @@ def updates():
             != 0
         )
         return
-    active("shui-security-updates.timer")
-    run("systemctl", "is-enabled", "shui-security-updates.timer")
-    assert run(
-        "systemctl",
-        "show",
-        "--value",
-        "-p",
-        "NextElapseUSecRealtime",
-        "shui-security-updates.timer",
-    )
-    run(
-        "systemd-analyze",
-        "verify",
-        "/etc/systemd/system/shui-security-updates.service",
-        "/etc/systemd/system/shui-security-updates.timer",
-    )
     if distro in ("debian", "ubuntu"):
+        for timer in ("apt-daily.timer", "apt-daily-upgrade.timer"):
+            active(timer)
+            run("systemctl", "is-enabled", timer)
+        assert not Path("/etc/systemd/system/shui-security-updates.service").exists()
         configuration = run("apt-config", "dump")
         origins = [
             line
@@ -205,21 +193,37 @@ def updates():
             )
         ]
         assert origins and all("-security" in line for line in origins), origins
-        assert 'Unattended-Upgrade::Automatic-Reboot "false";' in configuration
-    # Actually run the scheduled service, rather than just checking unit text.
-    run("systemctl", "start", "shui-security-updates.service", timeout=900)
-    assert (
-        run(
-            "systemctl",
-            "show",
-            "--value",
-            "-p",
-            "Result",
-            "shui-security-updates.service",
-        )
-        == "success"
+        for setting in (
+            "Automatic-Reboot",
+            "Remove-Unused-Kernel-Packages",
+            "Remove-New-Unused-Dependencies",
+            "Remove-Unused-Dependencies",
+        ):
+            assert f'Unattended-Upgrade::{setting} "false";' in configuration
+        CASES.append({"case": "native-apt-security-update-timers", "status": "passed"})
+        return
+    timer = (
+        "dnf5-automatic.timer" if distro == "fedora" else "dnf-automatic-install.timer"
     )
-    CASES.append({"case": "security-update-service-completes", "status": "passed"})
+    active(timer)
+    run("systemctl", "is-enabled", timer)
+    assert run(
+        "systemctl",
+        "show",
+        "--value",
+        "-p",
+        "NextElapseUSecRealtime",
+        timer,
+    )
+    assert not Path("/etc/systemd/system/shui-security-updates.service").exists()
+    assert not Path("/etc/systemd/system/shui-security-updates.timer").exists()
+    policy = configparser.ConfigParser()
+    policy.read("/etc/dnf/automatic.conf")
+    assert policy["commands"]["upgrade_type"] == "security"
+    assert policy["commands"].getboolean("apply_updates")
+    assert policy["commands"].getboolean("download_updates")
+    assert policy["commands"].get("reboot", "never") == "never"
+    CASES.append({"case": "native-dnf-security-update-timer", "status": "passed"})
 
 
 def journals():
@@ -285,7 +289,15 @@ def log_cleanup():
     assert archive.exists() and old.exists(), (
         "unchecked cleanup options must preserve logs/caches"
     )
-    script("logs-retention")
+    script("logs-retention-decline", "logs-retention")
+    assert archive.exists(), "Unknown archives must survive a declined confirmation"
+    opened = Path("/var/log/shui-open.log.1")
+    opened.write_text("keep while open")
+    os.utime(opened, (earlier, earlier))
+    with opened.open():
+        script("logs-retention", archive_consent="y")
+        assert opened.exists(), "confirmation must not allow deleting an open log"
+    opened.unlink()
     assert not old.exists() and recent.exists()
     assert not archive.exists() and latest.exists()
     assert live.stat().st_size <= 10 * 1024 * 1024
@@ -301,7 +313,7 @@ def log_cleanup():
                 "/etc/containers/containers.conf.d/90-shui-logging.conf"
             ).read_text()
         )
-    script("logs-cleanup")
+    script("logs-cleanup", archive_consent="y")
     assert not recent.exists() and not latest.exists()
     assert live.exists() and outside.read_text() == "preserve outside cache"
     check_guest_recursion()
@@ -311,6 +323,14 @@ def log_cleanup():
 
 
 def firewall():
+    # Stopping modern firewalld can leave persistent nftables rules in place.
+    # Seed the baseline using its native API, not assumptions about an empty host.
+    if shutil.which("firewall-cmd"):
+        run("systemctl", "start", "firewalld")
+        for port in ("2222/tcp", "8080/tcp", "8081/tcp", "5353/udp", "5354/udp"):
+            run("firewall-cmd", f"--add-port={port}")
+    if shutil.which("ufw"):
+        run("ufw", "--force", "disable")
     run("ip", "netns", "add", "client")
     run("ip", "link", "add", "server0", "type", "veth", "peer", "name", "client0")
     run("ip", "link", "set", "client0", "netns", "client")
@@ -357,7 +377,12 @@ time.sleep(600)
             if probe(8080):
                 break
             time.sleep(0.1)
-        assert probe(2222) and probe(8081) and probe(5354, udp=True)
+        baseline = {
+            "ssh": probe(2222),
+            "tcp": probe(8081),
+            "udp": probe(5354, udp=True),
+        }
+        assert all(baseline.values()), baseline
         for fixture in (
             "firewall-invalid-ip",
             "firewall-invalid-port",
@@ -368,6 +393,25 @@ time.sleep(600)
             assert probe(2222) and probe(8081)
         if shutil.which("ufw"):
             run("ufw", "allow", "8081/tcp")
+            run("ufw", "default", "deny", "outgoing")
+            run("ufw", "allow", "out", "53/udp", "comment", "fixture ALLOW IN retained")
+            run(
+                "ufw",
+                "route",
+                "allow",
+                "in",
+                "on",
+                "server0",
+                "out",
+                "on",
+                "eth0",
+                "to",
+                "any",
+                "port",
+                "8443",
+                "proto",
+                "tcp",
+            )
         else:
             run("systemctl", "start", "firewalld")
             run("firewall-cmd", "--permanent", "--add-port=8081/tcp")
@@ -391,12 +435,36 @@ time.sleep(600)
         script("firewall")
         assert probe(2222, "192.0.2.2") and probe(2222, "2001:db8::3")
         assert not probe(8080) and not probe(8081)
+        if shutil.which("ufw"):
+            rules = run("ufw", "show", "added")
+            assert "allow out 53/udp" in rules and "fixture ALLOW IN retained" in rules
+            assert "ufw route allow" in rules and "8443" in rules
+            assert (
+                'DEFAULT_OUTPUT_POLICY="DROP"' in Path("/etc/default/ufw").read_text()
+            )
         CASES.append(
             {
                 "case": "firewall-enforces-ipv4-ipv6-tcp-udp-and-edits",
                 "status": "passed",
             }
         )
+    except Exception:
+        diagnostics = []
+        for command in (
+            ("ss", "-lntup"),
+            ("nft", "list", "ruleset"),
+            ("iptables-save",),
+            ("ip6tables-save",),
+            ("systemctl", "is-active", "firewalld"),
+        ):
+            if shutil.which(command[0]):
+                result = subprocess.run(
+                    command, capture_output=True, text=True, timeout=15
+                )
+                diagnostics.append(f"{command}:\n{result.stdout}\n{result.stderr}")
+        (RESULTS / "firewall-diagnostics.log").write_text("\n".join(diagnostics))
+        print("\n".join(diagnostics), flush=True)
+        raise
     finally:
         listener.terminate()
         listener.wait(timeout=5)
@@ -404,15 +472,29 @@ time.sleep(600)
 
 
 def main():
-    for _ in range(100):
-        if Path("/run/systemd/system").exists():
+    deadline = time.monotonic() + 90
+    while True:
+        ready = subprocess.run(
+            ["systemctl", "is-active", "--quiet", "systemd-journald"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if ready.returncode == 0 or time.monotonic() >= deadline:
             break
         time.sleep(0.1)
+    assert ready.returncode == 0, (
+        f"systemd-journald did not become ready: {ready.stderr}"
+    )
     subprocess.run(
         ["systemctl", "is-system-running", "--wait"], timeout=90, capture_output=True
     )
     active("systemd-journald")
     # Package installation tests must not race the image's background apt jobs.
+    # Firewall fixtures start from an unconfigured, inactive backend.
+    subprocess.run(
+        ["systemctl", "stop", "ufw.service", "firewalld.service"], capture_output=True
+    )
     subprocess.run(
         ["systemctl", "stop", "apt-daily.timer", "apt-daily-upgrade.timer"],
         capture_output=True,

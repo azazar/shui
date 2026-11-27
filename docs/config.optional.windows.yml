@@ -1,9 +1,5 @@
 # Native variants of optional examples; merged only for Windows examples/tests.
 profiles:
-  - name: Work
-    shell: direct
-    command: ssh -tt -- %h %{remote}
-    port_args: [-p, '%p']
   - name: Remote command
     shell: direct
     command: ssh -- %h %{input:remote}

@@ -63,6 +63,7 @@ fn windows_defaults_work_without_posix_tools() {
     }
     let root = std::env::temp_dir().join(format!("shui-native-{}", std::process::id()));
     fs::create_dir_all(root.join("bin")).unwrap();
+    fs::create_dir_all(root.join("temp")).unwrap();
     let result = std::panic::catch_unwind(|| {
         let fixture = root.join("client.exe");
         if let Some(source) = std::env::var_os("SHUI_TEST_NATIVE_CLIENT") {
@@ -113,6 +114,8 @@ fn windows_defaults_work_without_posix_tools() {
             .env("PATH", path)
             .env("XDG_CONFIG_HOME", root.join("settings"))
             .env("USERPROFILE", &root)
+            .env("TEMP", root.join("temp"))
+            .env("TMP", root.join("temp"))
             .env("TERM", "test-terminal")
             .stdin(Stdio::null())
             .output()
@@ -151,12 +154,9 @@ fn child(root: &Path) {
     let log = root.join("calls");
     for profile in &config.profiles {
         assert_eq!(profile.shell, Shell::Direct, "{}", profile.name);
-        // Wine supplies no functional Windows PowerShell; native CI tests it.
-        if profile.name != "Mosh" || std::env::var_os("SHUI_TEST_WINE").is_none() {
-            assert!(profile.is_available(), "{}", profile.name);
-            if let Some(command) = profile.prepare(&target).unwrap() {
-                run(command, &log);
-            }
+        assert!(profile.is_available(), "{}", profile.name);
+        if let Some(command) = profile.prepare(&target).unwrap() {
+            run(command, &log);
         }
         run(profile.command(&target).unwrap(), &log);
         let all = records(&log);
@@ -181,9 +181,6 @@ fn child(root: &Path) {
             .unwrap()
             .is_available()
     );
-    if std::env::var_os("SHUI_TEST_WINE").is_some() {
-        return;
-    }
     fs::create_dir_all(root.join(".ssh")).unwrap();
     let key = "id_o'hara ü.pub";
     fs::write(
@@ -198,6 +195,8 @@ fn child(root: &Path) {
     .unwrap();
     fs::create_dir_all(root.join("src/dotfiles")).unwrap();
     fs::write(root.join("src/dotfiles/install.sh"), "fixture").unwrap();
+    let binary: Vec<u8> = (0..=255).collect();
+    fs::write(root.join("src/dotfiles/binary"), &binary).unwrap();
     for profile in &config.configuration_scripts {
         let direct = matches!(
             profile.name.as_str(),
@@ -229,6 +228,7 @@ fn child(root: &Path) {
         }
         fs::remove_file(&log).unwrap();
         run(profile.command_with_inputs(&target, &values).unwrap(), &log);
+        assert_eq!(fs::read_dir(root.join("temp")).unwrap().count(), 0);
         let all = records(&log);
         assert!(!all.is_empty());
         for call in &all {
@@ -254,10 +254,20 @@ fn child(root: &Path) {
                 profile.name == "Configure SSH-agent sudo"
             );
         } else if profile.name == "Install dotfiles" {
-            assert_eq!(all.len(), 3);
+            assert_eq!(all.len(), 2);
             assert_eq!(Path::new(&all[0][0]).file_stem().unwrap(), "ssh");
-            assert_eq!(Path::new(&all[1][0]).file_stem().unwrap(), "scp");
-            assert_eq!(Path::new(&all[2][0]).file_stem().unwrap(), "ssh");
+            assert_eq!(Path::new(&all[1][0]).file_stem().unwrap(), "ssh");
+            assert!(all[0].iter().any(|arg| arg.contains("tar -xf -")));
+            let archive = all[0].last().unwrap();
+            assert!(
+                archive.contains(
+                    &binary
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+                )
+            );
+            assert!(!archive.starts_with("efbbbf"));
             assert!(all.iter().all(|call| !call.iter().any(|arg| arg == "-i")));
         } else {
             assert_eq!(
@@ -276,6 +286,7 @@ fn child(root: &Path) {
             .output()
             .unwrap();
         assert!(!output.status.success());
+        assert_eq!(fs::read_dir(root.join("temp")).unwrap().count(), 0);
         assert_eq!(
             records(&log).len(),
             1,

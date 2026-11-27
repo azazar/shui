@@ -4,7 +4,7 @@
 # Commands and scripts are trusted shell code. Checks and generators run locally.
 #
 # Profile fields: name (unique), command (required), key, available_command,
-# prepare_command, inputs, shell, prepare_shell, port_args, and arbitrary string
+# prepare_command, prepare_remote, usage_command, inputs, shell, prepare_shell, port_args, and string
 # fields referenced by %{field}. Windows overrides use direct commands/PowerShell.
 # Inputs: promptString for text, pickString for one choice, checkbox for independent
 # options (default: true/false; Space toggles; templates receive true/false).
@@ -33,6 +33,9 @@
 # prepare_command runs locally with the terminal restored, before setup/connect/history.
 # Exit 0 continues; any failure/cancellation returns to the menu. It supports %h,
 # %p, %t and named fields, but not dialog inputs. It is only for launch profiles.
+# prepare_remote runs before %{remote} in the same remote shell. History contains
+# only the command for an already prepared host. A custom local script can supply
+# a single-line usage_command (literal client arguments) for Bash history.
 default: SSH
 # auto: show usernames only to distinguish accounts for the same host/port.
 # always: show known usernames; never: hide the username column.
@@ -43,93 +46,98 @@ username_display: auto
 
 profiles:
   - name: SSH
-    available_command: command -v ssh
+    shell: direct
+    available_command: sh -c 'command -v ssh'
     key: Alt+S
-    command: port=%p; exec ssh ${port:+-p "$port"} -- %h
+    command: ssh -- %h
+    port_args: [-p, '%p']
   - name: Mosh
-    available_command: command -v ssh && command -v mosh
+    shell: direct
+    available_command: sh -c 'command -v ssh && command -v mosh'
     key: Alt+M
-    command: port=%p; exec mosh ${port:+--ssh="ssh -p $port"} -- %h
+    command: mosh -- %h
+    port_args: ['--ssh=ssh -p %p']
   - name: MC
-    available_command: command -v ssh && command -v mc
+    shell: direct
+    available_command: sh -c 'command -v ssh && command -v mc'
     key: Alt+C
     command: mc /sh://%t/
   - name: Bash
-    available_command: command -v ssh
+    shell: direct
+    available_command: sh -c 'command -v ssh'
     key: Alt+B
-    command: port=%p; exec ssh ${port:+-p "$port"} -tt -- %h %{remote}
+    command: ssh -tt -- %h %{remote}
+    port_args: [-p, '%p']
     remote: exec bash -l
   - name: Zellij
-    available_command: command -v ssh
+    shell: direct
+    available_command: sh -c 'command -v ssh'
     key: Alt+Z
-    command: port=%p; exec ssh ${port:+-p "$port"} -tt -- %h %{remote}
-    remote: sh -c %{script}
-    script: |
-      set -eu
-      if command -v zellij >/dev/null 2>&1; then
-        exec zellij attach --create options --show-startup-tips false --show-release-notes false
-      elif [ -x "$HOME/.local/bin/zellij" ]; then
-        exec "$HOME/.local/bin/zellij" attach --create options --show-startup-tips false --show-release-notes false
+    command: ssh -tt -- %h %{remote}
+    port_args: [-p, '%p']
+    remote: zellij attach --create options --show-startup-tips false --show-release-notes false
+    prepare_remote: |
+      set -u
+      if ! command -v zellij >/dev/null 2>&1; then
+        zellij_bin=$HOME/.local/bin/zellij
+        if [ ! -x "$zellij_bin" ]; then
+          fail() { printf 'shui: %s\n' "$*" >&2; exit 1; }
+          case "$(uname -s):$(uname -m)" in
+            Linux:x86_64)
+              platform=x86_64-unknown-linux-musl
+              expected=d006c521dcb475a6005d741e9dd7c5758e5a23b28dd60a5c10cebfa4876319dd ;;
+            Linux:aarch64|Linux:arm64)
+              platform=aarch64-unknown-linux-musl
+              expected=2a2c0621e6f3b11ecbb05d66939a48000a2508604620aa20727a5fd61c49f451 ;;
+            *) fail 'Install Zellij in your user profile on this platform; portable downloads support Linux x86-64/ARM64.' ;;
+          esac
+          umask 077
+          work=$(mktemp -d "${TMPDIR:-/tmp}/shui-zellij.XXXXXX")
+          trap 'rm -rf -- "$work"' 0
+          trap 'exit 1' HUP INT TERM
+          url=https://github.com/zellij-org/zellij/releases/download/v0.45.1/zellij-$platform.tar.gz
+          printf 'Downloading temporary Zellij 0.45.1...\n' >&2
+          if command -v curl >/dev/null 2>&1; then
+            curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location \
+              --retry 2 --connect-timeout 15 --max-time 180 --silent --show-error \
+              --output "$work/zellij.tar.gz" "$url" || fail 'Zellij download failed'
+          else
+            wget --https-only --timeout=30 --tries=2 -q -O "$work/zellij.tar.gz" "$url" || fail 'Zellij download failed'
+          fi
+          tar -xzf "$work/zellij.tar.gz" -C "$work" zellij || fail 'Cannot extract Zellij'
+          [ -f "$work/zellij" ] && [ ! -L "$work/zellij" ] || fail 'Invalid Zellij archive member'
+          if command -v sha256sum >/dev/null 2>&1; then
+            digest=$(sha256sum "$work/zellij")
+          else
+            digest=$(shasum -a 256 "$work/zellij")
+          fi
+          [ "${digest%% *}" = "$expected" ] || fail 'Zellij checksum mismatch; refusing to execute it'
+          chmod 700 "$work/zellij"
+          zellij_bin=$work/zellij
+        fi
+        zellij() { "$zellij_bin" "$@"; }
       fi
-      fail() { printf 'shui: %s\n' "$*" >&2; exit 1; }
-      case "$(uname -s):$(uname -m)" in
-        Linux:x86_64)
-          platform=x86_64-unknown-linux-musl
-          expected=d006c521dcb475a6005d741e9dd7c5758e5a23b28dd60a5c10cebfa4876319dd ;;
-        Linux:aarch64|Linux:arm64)
-          platform=aarch64-unknown-linux-musl
-          expected=2a2c0621e6f3b11ecbb05d66939a48000a2508604620aa20727a5fd61c49f451 ;;
-        *) fail 'Install Zellij in your user profile on this platform; portable downloads support Linux x86-64/ARM64.' ;;
-      esac
-      command -v tar >/dev/null 2>&1 || fail 'tar is required to unpack portable Zellij'
-      if command -v sha256sum >/dev/null 2>&1; then
-        checksum=sha256sum
-      elif command -v shasum >/dev/null 2>&1; then
-        checksum=shasum
-      else
-        fail 'sha256sum or shasum is required to verify portable Zellij'
-      fi
-      umask 077
-      work=$(mktemp -d "${TMPDIR:-/tmp}/shui-zellij.XXXXXX")
-      trap 'rm -rf -- "$work"' 0
-      trap 'exit 1' HUP INT TERM
-      url=https://github.com/zellij-org/zellij/releases/download/v0.45.1/zellij-$platform.tar.gz
-      printf 'Downloading temporary Zellij 0.45.1...\n' >&2
-      if command -v curl >/dev/null 2>&1; then
-        curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location \
-          --retry 2 --connect-timeout 15 --max-time 180 --silent --show-error \
-          --output "$work/zellij.tar.gz" "$url" || fail 'Zellij download failed'
-      elif command -v wget >/dev/null 2>&1; then
-        wget --https-only --timeout=30 --tries=2 -q -O "$work/zellij.tar.gz" "$url" || fail 'Zellij download failed'
-      else
-        fail 'curl or wget is required to download portable Zellij'
-      fi
-      tar -xzf "$work/zellij.tar.gz" -C "$work" zellij || fail 'Cannot extract Zellij'
-      [ -f "$work/zellij" ] && [ ! -L "$work/zellij" ] || fail 'Invalid Zellij archive member'
-      if [ "$checksum" = sha256sum ]; then
-        digest=$(sha256sum "$work/zellij")
-      else
-        digest=$(shasum -a 256 "$work/zellij")
-      fi
-      [ "${digest%% *}" = "$expected" ] || fail 'Zellij checksum mismatch; refusing to execute it'
-      chmod 700 "$work/zellij"
-      # Keep the wrapper alive to remove its temporary files after exit or detach.
-      "$work/zellij" attach --create options --show-startup-tips false --show-release-notes false
 
   # Persistent sessions, file transfers, monitoring and SSH forwarding.
   - name: Tmux
-    available_command: command -v ssh
+    shell: direct
+    available_command: sh -c 'command -v ssh'
     key: Alt+T
-    command: port=%p; exec ssh ${port:+-p "$port"} -tt -- %h %{remote}
+    command: ssh -tt -- %h %{remote}
+    port_args: [-p, '%p']
     remote: tmux attach-session || exec tmux new-session
   - name: SFTP
-    available_command: command -v sftp
+    shell: direct
+    available_command: sh -c 'command -v sftp'
     key: Alt+F
-    command: port=%p; exec sftp ${port:+-P "$port"} -- %h
+    command: sftp -- %h
+    port_args: [-P, '%p']
   - name: Monitor
-    available_command: command -v ssh
+    shell: direct
+    available_command: sh -c 'command -v ssh'
     key: Alt+H
-    command: port=%p; exec ssh ${port:+-p "$port"} -tt -- %h %{remote}
+    command: ssh -tt -- %h %{remote}
+    port_args: [-p, '%p']
     remote: exec btop
   - name: Tunnel
     available_command: command -v ssh
@@ -169,8 +177,10 @@ profiles:
   # Use a real hostname/address (or a PuTTY saved session) and explicit user/port.
   - name: Dropbear
     key: Alt+D
-    available_command: command -v dbclient
-    command: port=%p; exec dbclient ${port:+-p "$port"} -- %h
+    shell: direct
+    available_command: sh -c 'command -v dbclient'
+    command: dbclient -- %h
+    port_args: [-p, '%p']
 
 # F4 configures the selected host; Shift+F4 opens Add new to add and connect.
 # You can also switch between these modes using the Action field.
@@ -219,8 +229,8 @@ configuration_scripts:
       host=$1
       port=$2
       key=$(sh -c "$3" -- "$4" "$6")
-      cat "$key" | ssh ${port:+-p "$port"} -- "$host" "$7"
-      cat "$key" | ssh ${port:+-p "$port"} -i "${key%.pub}" -- "$host" "$5"
+      ssh ${port:+-p "$port"} -- "$host" "$7" < "$key"
+      ssh ${port:+-p "$port"} -i "${key%.pub}" -- "$host" "$5" < "$key"
     install_key_remote: sh -c %{install_key}
     install_key: |
       set -eu
@@ -230,6 +240,7 @@ configuration_scripts:
       test ! -L "$file" || { echo 'Refusing symlinked authorized_keys.' >&2; exit 1; }
       test ! -e "$file" || test -f "$file" || exit 1
       IFS= read -r key || test -n "$key"
+      key=$(printf '%s' "$key" | tr -d '\r')
       fingerprint=$(printf '%s\n' "$key" | ssh-keygen -lf - | awk '{print $2}')
       test -n "$fingerprint" || { echo 'Invalid public key.' >&2; exit 1; }
       # Check key identity, not whether some other configured key can log in.
@@ -259,7 +270,7 @@ configuration_scripts:
         expiry=$(date -u -d "@$deadline" +%Y%m%d%H%M%SZ 2>/dev/null) ||
           expiry=$(date -u -r "$deadline" +%Y%m%d%H%M%SZ)
       fi
-      read -r key_type key_blob comment || :
+      read -r key_type key_blob _comment || :
       [ -n "$key_type" ] && [ -n "$key_blob" ] || exit 1
       file="$HOME/.ssh/authorized_keys"
       [ -f "$file" ] && [ ! -L "$file" ] || {
@@ -339,6 +350,31 @@ configuration_scripts:
       }
       printf '%s\n' "$public"
   - name: Install dotfiles
+    packages: &install_packages |
+      set -eu
+      [ "$#" -gt 0 ] || exit 0
+      . /etc/os-release
+      case " $ID ${ID_LIKE:-} " in
+        *' debian '*|*' ubuntu '*)
+          [ -n "${VERSION_CODENAME:-}" ] || { echo 'Cannot verify the installed release; install the missing dependencies manually.' >&2; exit 1; }
+          apt-get update
+          indexes=$(apt-get indextargets --format "\$(ORIGIN)|\$(CODENAME)")
+          [ -n "$indexes" ] || { echo 'No repository release metadata; refusing package installation.' >&2; exit 1; }
+          printf '%s\n' "$indexes" | while IFS='|' read -r origin codename; do
+            case "$origin" in
+              Debian*|Ubuntu*)
+                case "$codename" in "$VERSION_CODENAME"|"$VERSION_CODENAME"-*) ;;
+                  *) echo "Repository release $codename does not match installed $VERSION_CODENAME; fix repositories manually." >&2; exit 1 ;;
+                esac ;;
+            esac
+          done
+          DEBIAN_FRONTEND=noninteractive apt-get install --no-upgrade --no-remove --no-install-recommends -y "$@" ;;
+        *' fedora '*|*' rhel '*|*' rocky '*) dnf --setopt=install_weak_deps=False install -y "$@" ;;
+        *' suse '*|*' opensuse-tumbleweed '*) zypper --non-interactive install --no-recommends "$@" ;;
+        *' arch '*) pacman -S --needed --noconfirm "$@" ;;
+        *' alpine '*) apk add "$@" ;;
+        *) echo "Unsupported dependency installer for $ID; install dependencies manually." >&2; exit 1 ;;
+      esac
     # Relative source paths are resolved under local $HOME.
     inputs:
       - id: source
@@ -365,111 +401,108 @@ configuration_scripts:
       installer=$4
       case "$source" in '~') source=$HOME ;; '~/'*) source="$HOME/${source#\~/}" ;; /*) ;; *) source="$HOME/$source" ;; esac
       test -f "$source/$installer" || { echo "Missing $source/$installer" >&2; exit 1; }
-      ssh ${port:+-p "$port"} -- "$host" 'mkdir -p "$HOME/src/dotfiles"'
-      scp ${port:+-P "$port"} -r "$source/." "$host:src/dotfiles/"
+      archive=$(mktemp "${TMPDIR:-/tmp}/shui-dotfiles.XXXXXX")
+      trap 'rm -f "$archive"' 0
+      trap 'exit 1' HUP INT TERM
+      tar -cf "$archive" -C "$source" .
+      ssh ${port:+-p "$port"} -- "$host" 'set -eu; mkdir -p "$HOME/src/dotfiles"; tar -xf - -C "$HOME/src/dotfiles"' < "$archive"
       ssh ${port:+-p "$port"} -tt -- "$host" "$5"
-    remote: sh -c %{script} -- %{input:installer} %{input:shell}
+    remote: sh -c %{script} -- %{input:installer} %{input:shell} %{packages}
     script: |
       set -eu
       if ! command -v "$2" >/dev/null; then
         case "$2" in bash) ;; *) echo 'Unsupported installer shell.' >&2; exit 1 ;; esac
         root() { if [ "$(id -u)" = 0 ]; then "$@"; else sudo "$@"; fi; }
-        . /etc/os-release
-        case " $ID ${ID_LIKE:-} " in
-          *' debian '*|*' ubuntu '*) root apt-get update; root env DEBIAN_FRONTEND=noninteractive apt-get install -y bash ;;
-          *' fedora '*|*' rhel '*|*' rocky '*) root dnf install -y bash ;;
-          *' suse '*|*' opensuse-tumbleweed '*) root zypper --non-interactive install bash ;;
-          *' arch '*) root pacman -S --needed --noconfirm bash ;;
-          *' alpine '*) root apk add bash ;;
-          *) echo "No supported shell package installer for $ID" >&2; exit 1 ;;
-        esac
+        root sh -c "$3" -- bash
       fi
       cd "$HOME/src/dotfiles"
       exec "$2" "./$1"
   - name: Configure passwordless sudo
+    packages: *install_packages
     command: port=%p; exec ssh ${port:+-p "$port"} -tt -- %h %{remote}
-    remote: sh -c %{elevate} -- %{script} %{install_sudo}
-    elevate: &sudo_elevate |
+    remote: sh -c %{elevate} -- %{script} %{install_sudo} %{packages} %{input:scope} %{input:account}
+    inputs:
+      - {id: scope, type: pickString, description: 'Grant passwordless sudo to (other rules unchanged)', options: [Selected user, Administrative group], default: Selected user}
+      - {id: account, type: promptString, description: 'User name (blank = SSH login; ignored for group scope)', default: '', pattern: '[a-zA-Z_][a-zA-Z0-9_-]*', validation_message: Enter a local login name}
+    elevate: &recipe_elevate |
       set -eu
       script=$1
       shift
       if [ "$(id -u)" = 0 ]; then
         exec sh -c "$script" -- "$@"
       fi
-      command -v sudo >/dev/null 2>&1 || {
-        echo 'Install sudo or connect as root to configure this host.' >&2
-        exit 1
-      }
       exec sudo sh -c "$script" -- "$@"
     install_sudo: &install_sudo |
       set -eu
       if command -v sudo >/dev/null && command -v visudo >/dev/null; then exit 0; fi
-      . /etc/os-release
-      case " $ID ${ID_LIKE:-} " in
-        *' debian '*|*' ubuntu '*) apt-get update; DEBIAN_FRONTEND=noninteractive apt-get install -y sudo ;;
-        *' fedora '*|*' rhel '*|*' rocky '*) dnf install -y sudo ;;
-        *' suse '*|*' opensuse-tumbleweed '*) zypper --non-interactive install sudo ;;
-        *' arch '*) pacman -S --needed --noconfirm sudo ;;
-        *' alpine '*) apk add sudo ;;
-        *) echo "No supported sudo package installer for $ID" >&2; exit 1 ;;
-      esac
-      command -v sudo >/dev/null && command -v visudo >/dev/null
+      sh -c "$1" -- sudo
     script: |
       set -eu
-      . /etc/os-release
-      case " $ID ${ID_LIKE:-} " in
-        *' debian '*|*' ubuntu '*) group=sudo ;;
-        *' fedora '*|*' rhel '*|*' rocky '*|*' alpine '*|*' arch '*|*' suse '*|*' opensuse-tumbleweed '*) group=wheel ;;
-        *) echo "Unsupported administrative group for $ID" >&2; exit 1 ;;
+      installer=$1 packages=$2 scope=$3 account=$4
+      case "$scope" in
+        'Selected user')
+          account=${account:-${SUDO_USER:-$(id -un)}}
+          case "$account" in ''|*[!a-zA-Z0-9_-]*) echo 'Invalid sudo user.' >&2; exit 1 ;; esac
+          id "$account" >/dev/null
+          subject=$account
+          fragment=/etc/sudoers.d/shui-nopasswd-user-$account ;;
+        'Administrative group')
+          . /etc/os-release
+          case " $ID ${ID_LIKE:-} " in
+            *' debian '*|*' ubuntu '*) group=sudo ;;
+            *' fedora '*|*' rhel '*|*' rocky '*|*' alpine '*|*' arch '*|*' suse '*|*' opensuse-tumbleweed '*) group=wheel ;;
+            *) echo "Unsupported administrative group for $ID" >&2; exit 1 ;;
+          esac
+          subject=%$group
+          fragment=/etc/sudoers.d/shui-nopasswd-group-$group ;;
+        *) echo 'Invalid sudo scope.' >&2; exit 1 ;;
       esac
-      sh -c "$1"
-      if ! getent group "$group" >/dev/null; then
+      sh -c "$installer" -- "$packages"
+      if [ "$scope" = 'Administrative group' ] && ! getent group "$group" >/dev/null; then
         if command -v groupadd >/dev/null; then groupadd "$group"; else addgroup -S "$group"; fi
       fi
       mkdir -p /etc/sudoers.d
       work=$(mktemp -d /etc/sudoers.d/.shui-nopasswd.XXXXXX)
       trap 'rm -rf "$work"' 0
       trap 'exit 1' HUP INT TERM
-      printf '%%%s ALL=(ALL:ALL) NOPASSWD: ALL\n' "$group" > "$work/nopasswd"
+      printf '%s ALL=(ALL:ALL) NOPASSWD: ALL\n' "$subject" > "$work/nopasswd"
       chmod 0440 "$work/nopasswd"
       visudo -cf "$work/nopasswd"
-      test ! -L /etc/sudoers.d/nopasswd || {
-        echo 'Refusing symlinked /etc/sudoers.d/nopasswd' >&2; exit 1;
+      test ! -L "$fragment" || {
+        echo "Refusing symlinked $fragment" >&2; exit 1;
       }
-      if [ -f /etc/sudoers.d/nopasswd ]; then
-        cp -p /etc/sudoers.d/nopasswd "$work/original"
+      if [ -f "$fragment" ]; then
+        cp -p "$fragment" "$work/original"
       fi
-      mv "$work/nopasswd" /etc/sudoers.d/nopasswd
+      mv "$work/nopasswd" "$fragment"
       if ! visudo -c; then
         if [ -f "$work/original" ]; then
-          mv "$work/original" /etc/sudoers.d/nopasswd
+          mv "$work/original" "$fragment"
         else
-          rm -f /etc/sudoers.d/nopasswd
+          rm -f "$fragment"
         fi
         exit 1
       fi
-      printf 'Passwordless sudo configured for group %s.\n' "$group"
+      printf 'Passwordless sudo configured for %s.\n' "$subject"
   - name: Configure SSH-agent sudo
+    packages: *install_packages
     install_sudo: *install_sudo
     command: port=%p; exec ssh ${port:+-p "$port"} -A -tt -- %h %{remote}
-    remote: sh -c %{prepare} -- %{script} %{install_sudo}
+    remote: sh -c %{prepare} -- %{script} %{install_sudo} %{packages}
     prepare: |
       set -eu
-      test -n "${SSH_AUTH_SOCK:-}" || {
-        echo 'Forward an SSH agent containing your authentication key (ssh -A).' >&2; exit 1;
-      }
-      keys=$(ssh-add -L) || { echo 'The forwarded agent has no usable keys.' >&2; exit 1; }
+      keys=$(ssh-add -L)
       user=$(id -un)
       if [ "$(id -u)" = 0 ]; then
-        exec sh -c "$1" -- "$user" "$keys" "$2"
+        exec sh -c "$1" -- "$user" "$keys" "$2" "$3"
       fi
-      exec sudo sh -c "$1" -- "$user" "$keys" "$2"
+      exec sudo sh -c "$1" -- "$user" "$keys" "$2" "$3"
     script: |
       set -eu
       user=$1
       keys=$2
       case "$user" in ''|*[!a-zA-Z0-9_-]*) echo 'Unsupported login username.' >&2; exit 1 ;; esac
-      sh -c "$3"
+      sh -c "$3" -- "$4"
       . /etc/os-release
       module=
       find_module() {
@@ -481,17 +514,13 @@ configuration_scripts:
       if ! find_module; then
         case " $ID ${ID_LIKE:-} " in
           *' debian '*|*' ubuntu '*)
-            apt-get update
-            DEBIAN_FRONTEND=noninteractive apt-get install -y libpam-ssh-agent-auth ;;
-          *' fedora '*|*' rhel '*|*' rocky '*) dnf install -y pam_ssh_agent_auth ;;
-          *' suse '*|*' opensuse-tumbleweed '*) zypper --non-interactive install pam_ssh_agent_auth ;;
-          *' arch '*) pacman -S --needed --noconfirm pam-ssh-agent-auth ;;
-          *' alpine '*) apk add pam-ssh-agent-auth ;;
+            sh -c "$4" -- libpam-ssh-agent-auth ;;
+          *' fedora '*|*' rhel '*|*' rocky '*|*' suse '*|*' opensuse-tumbleweed '*) sh -c "$4" -- pam_ssh_agent_auth ;;
+          *' arch '*|*' alpine '*) sh -c "$4" -- pam-ssh-agent-auth ;;
           *) echo "No supported package installer for $ID" >&2; exit 1 ;;
         esac
         find_module || { echo 'pam_ssh_agent_auth is not available from the enabled repositories.' >&2; exit 1; }
       fi
-      command -v visudo >/dev/null
       test -f /etc/pam.d/sudo || test -f /usr/lib/pam.d/sudo || { echo 'A PAM-enabled sudo installation is required.' >&2; exit 1; }
       # Keep keys root-owned, independent of the user's SSH login authorized_keys.
       directory=/etc/security/ssh-agent-sudo
@@ -550,31 +579,100 @@ configuration_scripts:
       printf 'SSH-agent sudo configured for %s. Use agent forwarding on future connections.\n' "$user"
   - name: Configure automatic security updates
     command: port=%p; exec ssh ${port:+-p "$port"} -tt -- %h %{remote}
-    remote: sh -c %{elevate} -- %{script}
-    elevate: &recipe_elevate |
+    remote: sh -c %{elevate} -- %{traverse} %{script} %{traverse} %{input:reboot} 3
+    inputs:
+      - {id: reboot, type: checkbox, description: 'Native auto reboot when required, where supported (disconnects sessions)', default: false}
+    elevate: *recipe_elevate
+    traverse: |
       set -eu
-      script=$1
-      shift
-      if [ "$(id -u)" = 0 ]; then exec sh -c "$script" -- "$@"; fi
-      exec sudo sh -c "$script" -- "$@"
+      script=$1 self=$2 reboot=$3 depth=$4
+      warn() { echo "WARNING: $*. Update affected systems manually." >&2; }
+      failures=0
+      if ! sh -c "$script" -- "$reboot"; then failures=1; fi
+      if [ "$depth" -eq 0 ]; then
+        warn 'Nested guest traversal depth limit reached'
+        exit "$failures"
+      fi
+      # Never install transport helpers; each child invocation is bounded.
+      command -v timeout >/dev/null || { warn 'No timeout utility; guest traversal skipped'; exit "$failures"; }
+      depth=$((depth - 1))
+      count=0
+      slot() {
+        count=$((count + 1))
+        if [ "$count" -gt 16 ]; then warn '16-guest limit on this host reached'; return 1; fi
+      }
+      if command -v docker >/dev/null; then
+        if containers=$(timeout 15 docker ps -q --no-trunc); then
+          for container in $containers; do
+            slot || break
+            echo "Docker $container:"
+            if ! timeout 15 docker exec --user 0 "$container" /bin/sh -c ':'; then warn "Docker $container has no accessible shell"; continue; fi
+            if ! timeout 120 docker exec --user 0 "$container" /bin/sh -c "$self" -- "$script" "$self" "$reboot" "$depth"; then
+              warn "Docker $container could not be fully configured (it may lack a shell, permissions or a scheduler)"
+              failures=1
+            fi
+          done
+        else warn 'Docker inventory unavailable'; fi
+      fi
+      if command -v virsh >/dev/null; then
+        for uri in lxc:/// qemu:///system; do
+          if ! domains=$(timeout 15 virsh -c "$uri" list --state-running --uuid); then warn "Libvirt inventory unavailable: $uri"; continue; fi
+          for domain in $domains; do
+            slot || break
+            echo "Libvirt $uri $domain:"
+            if [ "$uri" = lxc:/// ]; then
+              if ! timeout 15 virsh -c "$uri" lxc-enter-namespace "$domain" -- /bin/sh -c ':'; then warn "LXC $domain has no accessible shell/namespace"; continue; fi
+              if ! timeout 120 virsh -c "$uri" lxc-enter-namespace "$domain" -- /bin/sh -c "$self" -- "$script" "$self" "$reboot" "$depth"; then
+                warn "LXC $domain could not be fully configured"
+                failures=1
+              fi
+              continue
+            fi
+            command -v jq >/dev/null && command -v base64 >/dev/null || { warn "QEMU $domain requires existing jq/base64 transport helpers"; continue; }
+            agent() { timeout 20 virsh -c "$uri" qemu-agent-command "$domain" --timeout 15 "$1" | jq -e '.return'; }
+            request=$(jq -nc --args '{execute:"guest-exec",arguments:{path:"/bin/sh",arg:$ARGS.positional,"capture-output":true}}' -- -c "$self" -- "$script" "$self" "$reboot" "$depth")
+            if ! pid=$(agent "$request" | jq -er '.pid'); then warn "QEMU $domain has no accessible guest agent or could not start /bin/sh"; continue; fi
+            request=$(jq -nc --argjson pid "$pid" '{execute:"guest-exec-status",arguments:{pid:$pid}}')
+            status='{}'
+            polls=0
+            while [ "$polls" -lt 60 ]; do
+              if ! status=$(agent "$request"); then break; fi
+              if printf '%s\n' "$status" | jq -e '.exited == true' >/dev/null; then break; fi
+              polls=$((polls + 1))
+              sleep 1
+            done
+            if ! printf '%s\n' "$status" | jq -r '."out-data" // ""' | base64 -d; then failures=1; fi
+            if ! printf '%s\n' "$status" | jq -r '."err-data" // ""' | base64 -d >&2; then failures=1; fi
+            if ! printf '%s\n' "$status" | jq -e '.exited == true and .exitcode == 0 and (."out-truncated" != true) and (."err-truncated" != true)' >/dev/null; then
+              warn "QEMU $domain returned incomplete configuration results; a timed-out command may still be running"
+              failures=1
+            fi
+          done
+        done
+      fi
+      exit "$failures"
     script: |
       set -eu
+      reboot=$1
+      case "$reboot" in true|false) ;; *) echo 'Invalid automatic reboot checkbox value.' >&2; exit 1 ;; esac
+      manual() { echo "WARNING: $*. Update this system manually." >&2; exit 0; }
+      [ -r /etc/os-release ] || manual 'OS identification is unavailable'
       . /etc/os-release
       case "$ID" in
         debian|ubuntu) installer=apt ;;
-        fedora|rhel|rocky|almalinux) installer=dnf ;;
+        fedora|rhel|rocky|almalinux|ol|centos) installer=dnf ;;
         opensuse-leap|sles) installer=zypper ;;
-        *) echo "Security-only automatic updates are unsupported on $ID." >&2; exit 1 ;;
+        *) manual "Native security-only automatic updates are unsupported on $ID" ;;
       esac
       test -d /run/systemd/system && command -v systemctl >/dev/null || {
-        echo 'Automatic security updates require a running systemd host.' >&2; exit 1;
+        manual 'No running native systemd scheduler is available';
       }
       case "$installer" in
         apt)
-          if ! command -v unattended-upgrade >/dev/null; then
-            apt-get update
-            DEBIAN_FRONTEND=noninteractive apt-get install -y unattended-upgrades
-          fi
+          command -v unattended-upgrade >/dev/null || {
+            manual 'Native unattended-upgrades is not installed; no packages or configuration were changed'
+          }
+          systemctl cat apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1 || manual 'Native apt timers are unavailable'
           # Clear inherited origin lists so only security pockets are eligible.
           cat > /etc/apt/apt.conf.d/52shui-security-updates <<'EOF'
       #clear Unattended-Upgrade::Allowed-Origins;
@@ -584,50 +682,87 @@ configuration_scripts:
         "origin=${distro_id}ESMApps,suite=${distro_codename}-apps-security";
         "origin=${distro_id}ESM,suite=${distro_codename}-infra-security";
       };
-      Unattended-Upgrade::Automatic-Reboot "false";
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+      Unattended-Upgrade::Remove-Unused-Kernel-Packages "false";
+      Unattended-Upgrade::Remove-New-Unused-Dependencies "false";
+      Unattended-Upgrade::Remove-Unused-Dependencies "false";
       EOF
-          update=/usr/bin/unattended-upgrade
-          refresh='ExecStartPre=/usr/bin/apt-get update'
+          printf 'Unattended-Upgrade::Automatic-Reboot "%s";\n' "$reboot" >> /etc/apt/apt.conf.d/52shui-security-updates
+          # Use distro timers, not a second update runner. Do not stop active dpkg work.
+          systemctl enable --now apt-daily.timer apt-daily-upgrade.timer
+          echo "Native apt security-update timers enabled; automatic reboot: $reboot. No immediate update was requested."
+          exit 0
           ;;
         dnf)
-          command -v dnf >/dev/null
-          update='/usr/bin/dnf -y upgrade --security'
-          refresh=
+          if systemctl cat dnf5-automatic.timer >/dev/null 2>&1; then
+            timer=dnf5-automatic.timer
+          elif systemctl cat dnf-automatic-install.timer >/dev/null 2>&1; then
+            timer=dnf-automatic-install.timer
+          else
+            manual 'Native DNF automatic updater is not installed'
+          fi
+          config=/etc/dnf/automatic.conf
+          [ ! -L "$config" ] || { echo 'Refusing symlinked DNF automatic configuration.' >&2; exit 1; }
+          native_reboot=false
+          if [ "$timer" = dnf5-automatic.timer ] || { [ -f "$config" ] && grep -Eq '^[#[:space:]]*reboot[[:space:]]*=' "$config"; }; then native_reboot=true; fi
+          mode=never
+          if [ "$reboot" = true ]; then
+            if [ "$native_reboot" = true ]; then mode=when-needed
+            else echo 'WARNING: Native conditional reboot is unavailable; reboot manually when required.' >&2; fi
+          fi
+          work=$(mktemp /etc/dnf/.automatic.XXXXXX)
+          trap 'rm -f "$work"' EXIT HUP INT TERM
+          input=/dev/null
+          if [ -f "$config" ]; then cp -p "$config" "$work"; input=$config; fi
+          # Preserve unrelated sections and settings; replace only the selected policy.
+          awk -v native="$native_reboot" -v mode="$mode" '
+            function policy() {
+              print "upgrade_type = security\ndownload_updates = yes\napply_updates = yes"
+              if (native == "true") print "reboot = " mode
+            }
+            /^[[:space:]]*\[/ {
+              if (commands) policy()
+              commands = ($0 ~ /^[[:space:]]*\[commands\][[:space:]]*$/)
+              if (commands) found=1
+            }
+            commands && /^[[:space:]]*(upgrade_type|download_updates|apply_updates|reboot)[[:space:]]*=/ { next }
+            { print }
+            END { if (commands) policy(); if (!found) { print "[commands]"; policy() } }
+          ' "$input" > "$work"
+          mv "$work" "$config"
+          systemctl enable --now "$timer"
+          echo "Native $timer enabled for security-only updates; no immediate update was requested."
           ;;
         zypper)
-          command -v zypper >/dev/null
-          update='/usr/bin/zypper --non-interactive patch --category security'
-          refresh='ExecStartPre=/usr/bin/zypper --non-interactive refresh'
+          [ -x /usr/lib/YaST2/bin/online_update ] && [ -f /etc/sysconfig/automatic_online_update ] || manual 'Native YaST automatic online updater is unavailable'
+          systemctl is-active --quiet cron.service || manual 'Native cron scheduler is not running'
+          scheduled=false
+          for interval in daily weekly monthly; do
+            if [ -L "/etc/cron.$interval/opensuse.org-online_update" ] && [ "$(readlink "/etc/cron.$interval/opensuse.org-online_update")" = /usr/lib/YaST2/bin/online_update ]; then scheduled=true; fi
+          done
+          [ "$scheduled" = true ] || manual 'Configure a native YaST automatic online update schedule first'
+          config=/etc/sysconfig/automatic_online_update
+          [ ! -L "$config" ] || { echo 'Refusing symlinked YaST automatic configuration.' >&2; exit 1; }
+          work=$(mktemp /etc/sysconfig/.automatic_online_update.XXXXXX)
+          trap 'rm -f "$work"' EXIT HUP INT TERM
+          cp -p "$config" "$work"
+          sed '/^[[:space:]]*AOU_\(ENABLE_CRONJOB\|SKIP_INTERACTIVE_PATCHES\|INCLUDE_RECOMMENDS\|PATCH_CATEGORIES\)=/d' "$config" > "$work"
+          cat >> "$work" <<'EOF'
+      AOU_ENABLE_CRONJOB="true"
+      AOU_SKIP_INTERACTIVE_PATCHES="true"
+      AOU_INCLUDE_RECOMMENDS="false"
+      AOU_PATCH_CATEGORIES="security"
+      EOF
+          mv "$work" "$config"
+          if [ "$reboot" = true ]; then echo 'WARNING: Native conditional reboot is unavailable here; reboot manually when required.' >&2; fi
+          echo 'Native YaST security-only automatic updates configured; no immediate update was requested.'
           ;;
       esac
-      mkdir -p /etc/systemd/system
-      cat > /etc/systemd/system/shui-security-updates.service <<EOF
-      [Unit]
-      Description=Shui automatic security updates
-      Wants=network-online.target
-      After=network-online.target
-      [Service]
-      Type=oneshot
-      $refresh
-      ExecStart=$update
-      EOF
-      cat > /etc/systemd/system/shui-security-updates.timer <<'EOF'
-      [Unit]
-      Description=Daily security updates
-      [Timer]
-      OnCalendar=daily
-      RandomizedDelaySec=1h
-      Persistent=true
-      [Install]
-      WantedBy=timers.target
-      EOF
-      systemctl daemon-reload
-      systemctl enable --now shui-security-updates.timer
-      systemctl is-active --quiet shui-security-updates.timer
-      echo 'Daily security-only updates enabled; automatic reboot is disabled.'
   - name: Install Docker / Podman
+    packages: *install_packages
     command: port=%p; exec ssh ${port:+-p "$port"} -tt -- %h %{remote}
-    remote: sh -c %{elevate} -- %{script} %{input:engine} %{input:runsc} %{input:runq} %{input:nvidia}
+    remote: sh -c %{elevate} -- %{script} %{input:engine} %{input:runsc} %{input:runq} %{input:nvidia} %{packages}
     elevate: *recipe_elevate
     inputs:
       - id: engine
@@ -642,6 +777,7 @@ configuration_scripts:
       set -eu
       case "$1" in Docker) engine=docker ;; Podman) engine=podman ;; *) echo 'Invalid container engine.' >&2; exit 1 ;; esac
       runsc=$2 runq=$3 nvidia=$4
+      packages=$5
       for selected in "$runsc" "$runq" "$nvidia"; do
         case "$selected" in true|false) ;; *) echo 'Invalid runtime checkbox value.' >&2; exit 1 ;; esac
       done
@@ -653,30 +789,24 @@ configuration_scripts:
       fi
       . /etc/os-release
       install_packages() {
-        # Enabled repositories only: never add repositories or build from source.
-        case " $ID ${ID_LIKE:-} " in
-          *' debian '*|*' ubuntu '*) apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" ;;
-          *' fedora '*|*' rhel '*|*' rocky '*) dnf install -y "$@" ;;
-          *' suse '*|*' opensuse-tumbleweed '*) zypper --non-interactive install "$@" ;;
-          *' arch '*) pacman -S --needed --noconfirm "$@" ;;
-          *' alpine '*) apk add "$@" ;;
-          *) echo "Unsupported container package installer for $ID." >&2; exit 1 ;;
-        esac
+        sh -c "$packages" -- "$@"
       }
+      package=$engine
       if [ "$engine" = docker ]; then
         test -d /run/systemd/system || command -v rc-service >/dev/null || {
           echo 'Docker requires systemd or OpenRC to manage its daemon.' >&2; exit 1;
         }
-      fi
-      package=$engine
-      if [ "$engine" = docker ]; then
         case " $ID ${ID_LIKE:-} " in
           *' debian '*|*' ubuntu '*) package=docker.io ;;
           *' fedora '*|*' rhel '*|*' rocky '*) package=moby-engine ;;
         esac
       fi
-      install_packages "$package"
-      if [ "$ID" = alpine ] && [ "$engine" = docker ]; then install_packages docker-openrc; fi
+      if ! command -v "$engine" >/dev/null || { [ "$engine" = docker ] && ! command -v dockerd >/dev/null; }; then install_packages "$package"; fi
+      # Debian splits the client from the daemon; both are required for Docker.
+      if [ "$engine" = docker ] && ! command -v docker >/dev/null; then
+        if apt-cache show docker-cli >/dev/null 2>&1; then install_packages docker-cli; fi
+      fi
+      if [ "$ID" = alpine ] && [ "$engine" = docker ] && [ ! -f /etc/init.d/docker ]; then install_packages docker-openrc; fi
       if [ "$engine" = docker ]; then
         if [ -d /run/systemd/system ]; then
           systemctl enable --now docker
@@ -686,10 +816,19 @@ configuration_scripts:
         fi
         docker info
       else
-        podman info
+        if info=$(LC_ALL=C podman info 2>&1); then printf '%s\n' "$info"
+        else
+          case "$info" in
+            *'default OCI runtime "crun" not found'*) install_packages crun ;;
+            *'default OCI runtime "runc" not found'*) install_packages runc ;;
+            *) printf '%s\n' "$info" >&2; exit 1 ;;
+          esac
+          podman info
+        fi
       fi
       if [ "$runsc:$runq:$nvidia" != false:false:false ]; then
-        set -- jq
+        set --
+        if ! command -v jq >/dev/null; then set -- jq; fi
         if [ "$runsc" = true ] && ! command -v runsc >/dev/null; then set -- "$@" runsc; fi
         if [ "$runq" = true ] && ! command -v runq >/dev/null && [ ! -x /var/lib/runq/runq ]; then set -- "$@" runq; fi
         if [ "$nvidia" = true ] && ! command -v nvidia-ctk >/dev/null; then set -- "$@" nvidia-container-toolkit; fi
@@ -704,7 +843,6 @@ configuration_scripts:
         trap 'rm -rf "$work"' 0
         if [ -e "$config" ]; then cp "$config" "$work/daemon.json"; else echo '{}' > "$work/daemon.json"; fi
         if [ "$nvidia" = true ]; then
-          nvidia-ctk --version
           nvidia-ctk runtime configure --runtime=docker --config="$work/daemon.json"
         fi
         for runtime in runsc runq; do
@@ -712,7 +850,6 @@ configuration_scripts:
           [ "$selected" = true ] || continue
           binary=$(command -v "$runtime" || true)
           if [ -z "$binary" ] && [ "$runtime" = runq ] && [ -x /var/lib/runq/runq ]; then binary=/var/lib/runq/runq; fi
-          test -n "$binary" || { echo "The $runtime package did not provide its executable." >&2; exit 1; }
           "$binary" --version
           jq --arg name "$runtime" --arg binary "$binary" '.runtimes[$name].path = $binary' "$work/daemon.json" > "$work/next"
           mv "$work/next" "$work/daemon.json"
@@ -721,15 +858,23 @@ configuration_scripts:
         if [ -e "$config" ]; then chmod "$(stat -c %a "$config")" "$work/daemon.json"; else chmod 644 "$work/daemon.json"; fi
         mv "$work/daemon.json" "$config"
         if [ -d /run/systemd/system ]; then systemctl reload docker; else rc-service docker reload; fi
-        docker info --format '{{json .Runtimes}}' > "$work/registered"
-        for runtime in runsc runq nvidia; do
-          case "$runtime" in runsc) selected=$runsc ;; runq) selected=$runq ;; nvidia) selected=$nvidia ;; esac
-          [ "$selected" != true ] || jq -e --arg name "$runtime" 'has($name)' "$work/registered" >/dev/null
+        # A service reload can return before Docker handles SIGHUP.
+        for attempt in 1 2 3 4 5; do
+          docker info --format '{{json .Runtimes}}' > "$work/registered"
+          if jq -e --argjson runsc "$runsc" --argjson runq "$runq" --argjson nvidia "$nvidia" '
+            ($runsc == false or has("runsc")) and
+            ($runq == false or has("runq")) and
+            ($nvidia == false or has("nvidia"))
+          ' "$work/registered" >/dev/null; then exit 0; fi
+          [ "$attempt" -eq 5 ] || sleep 1
         done
+        echo 'Docker did not register the selected runtimes after reload.' >&2
+        exit 1
       fi
   - name: Configure log limits and cleanup
+    packages: *install_packages
     command: port=%p; exec ssh ${port:+-p "$port"} -tt -- %h %{remote}
-    remote: sh -c %{elevate} -- %{bootstrap} %{bootstrap} %{maintenance} %{input:disk} %{input:runtime} %{input:days} %{input:file_size} %{input:backups} %{input:cleanup} %{input:all_archives} %{input:package_caches} %{input:user_caches} %{input:all_users} %{input:guests} %{input:depth}
+    remote: sh -c %{elevate} -- %{bootstrap} %{bootstrap} %{maintenance} %{packages} %{input:disk} %{input:runtime} %{input:days} %{input:file_size} %{input:backups} %{input:cleanup} %{input:all_archives} %{input:package_caches} %{input:user_caches} %{input:all_users} %{input:guests} %{input:depth}
     elevate: *recipe_elevate
     inputs:
       - {id: disk, type: promptString, description: 'Disk journal cap (bytes or K/M/G/T; e.g. 512M)', default: 512M, required: true, pattern: &log_size_pattern '[1-9][0-9]*[KMGT]?', validation_message: &log_size_hint 'Use positive bytes or an uppercase K/M/G/T suffix, e.g. 512M'}
@@ -746,76 +891,71 @@ configuration_scripts:
       - {id: depth, type: promptString, description: Guest depth (0-5; 0 disables traversal), default: '2', required: true, pattern: '[0-5]', validation_message: Enter one digit from 0 to 5}
     bootstrap: |
       set -eu
-      if ! command -v bash >/dev/null || ! command -v jq >/dev/null || ! command -v logrotate >/dev/null ||
-         ! command -v timeout >/dev/null || ! find --version >/dev/null 2>&1; then
-        . /etc/os-release
-        case " $ID ${ID_LIKE:-} " in
-          *' debian '*|*' ubuntu '*) apt-get update; DEBIAN_FRONTEND=noninteractive apt-get install -y bash jq logrotate coreutils findutils ;;
-          *' fedora '*|*' rhel '*|*' rocky '*) dnf install -y bash jq logrotate coreutils findutils ;;
-          *' suse '*|*' opensuse-tumbleweed '*) zypper --non-interactive install bash jq logrotate coreutils findutils ;;
-          *' arch '*) pacman -S --needed --noconfirm bash jq logrotate coreutils findutils ;;
-          *' alpine '*) apk add bash jq logrotate coreutils findutils ;;
-          *) echo 'Install Bash, jq, logrotate, coreutils and findutils first.' >&2; exit 1 ;;
-        esac
-      fi
       bootstrap=$1
       maintenance=$2
-      shift 2
-      exec timeout 600 bash -c "$maintenance" -- "$bootstrap" "$maintenance" "$@"
+      packages=$3
+      shift 3
+      fail() { printf '%s\n' "$*" >&2; exit 1; }
+      bytes() {
+        number=${1%[KMGT]} factor=1
+        case "$number" in ''|0*|*[!0-9]*) fail 'Use positive bytes or a K/M/G/T suffix' ;; esac
+        case "$1" in *K) factor=1024 ;; *M) factor=1048576 ;; *G) factor=1073741824 ;; *T) factor=1099511627776 ;; esac
+        [ "${#number}" -le 18 ] && [ "$number" -le "$((1152921504606846976 / factor))" ] || fail 'Log size is too large'
+        echo "$((number * factor))"
+      }
+      bytes "$1" >/dev/null
+      bytes "$2" >/dev/null
+      file_bytes=$(bytes "$4")
+      case "$3" in ''|0*|*[!0-9]*) fail 'Days must be 1-36500' ;; esac
+      [ "${#3}" -le 5 ] && [ "$3" -le 36500 ] || fail 'Days must be 1-36500'
+      case "$5" in ''|0*|*[!0-9]*) fail 'Backups must be 1-100' ;; esac
+      [ "${#5}" -le 3 ] && [ "$5" -le 100 ] || fail 'Backups must be 1-100'
+      case "${12}" in [0-5]) ;; *) fail 'Guest depth must be 0-5' ;; esac
+      for selected in "$6" "$7" "$8" "$9" "${10}" "${11}"; do
+        case "$selected" in true|false) ;; *) fail 'Invalid cleanup checkbox value' ;; esac
+      done
+      [ "$7" != true ] || [ "$6" = true ] || fail 'Deleting all archives requires rotated-log cleanup'
+      [ "${10}" != true ] || [ "$9" = true ] || fail 'All-user scope requires user cache cleanup'
+      # Depth-zero children still owe their parent a traversal result.
+      guests=false
+      if [ "${11}" = true ] && { [ "${12}" != 0 ] || [ "$#" -gt 12 ]; }; then guests=true; fi
+      missing=
+      for tool in bash logrotate; do command -v "$tool" >/dev/null || missing="$missing $tool"; done
+      if command -v docker >/dev/null || [ "$guests" = true ]; then
+        command -v jq >/dev/null || missing="$missing jq"
+      fi
+      command -v timeout >/dev/null || missing="$missing coreutils"
+      if [ "$6:$9" != false:false ] && ! find . --version >/dev/null 2>&1; then missing="$missing findutils"; fi
+      # shellcheck disable=SC2086 # Split only the fixed package names above.
+      sh -c "$packages" -- $missing
+      exec timeout 600 bash -c "$maintenance" -- "$bootstrap" "$maintenance" "$packages" "$file_bytes" "$guests" "$@"
     maintenance: |
       set -euo pipefail
       bootstrap=$1
       source=$2
-      shift 2
+      packages=$3 file_bytes=$4 guests=$5
+      shift 5
       options=("${@:1:12}")
-      disk=$1 runtime=$2 days=$3 file_size=$4 backups=$5 cleanup_logs=$6 all_archives=$7 package_caches=$8 user_caches=$9
-      all_users=${10} guests=${11} depth=${12}
-      context='{"seen":[],"remaining":16}'
-      if (( $# > 12 )); then context=${13}; fi
+      disk=$1 runtime=$2 days=$3 backups=$5 cleanup_logs=$6 all_archives=$7 package_caches=$8 user_caches=$9
+      all_users=${10} depth=${12}
       fail() { printf '%s\n' "$*" >&2; exit 1; }
-      bytes() {
-        [[ $1 =~ ^([1-9][0-9]*)([KMGT]?)$ ]] || fail 'Use positive bytes or a K/M/G/T suffix'
-        number=${BASH_REMATCH[1]} suffix=${BASH_REMATCH[2]} factor=1
-        case "$suffix" in K) factor=1024 ;; M) factor=1048576 ;; G) factor=1073741824 ;; T) factor=1099511627776 ;; esac
-        (( ${#number} <= 18 )) && (( number <= 1152921504606846976 / factor )) || fail 'Log size is too large'
-        echo "$((number * factor))"
-      }
-      bytes "$disk" >/dev/null
-      bytes "$runtime" >/dev/null
-      file_bytes=$(bytes "$file_size")
-      [[ $days =~ ^[1-9][0-9]{0,4}$ ]] && (( days <= 36500 )) || fail 'Days must be 1-36500'
-      [[ $backups =~ ^[1-9][0-9]{0,2}$ ]] && (( backups <= 100 )) || fail 'Backups must be 1-100'
-      [[ $depth =~ ^[0-5]$ ]] || fail 'Guest depth must be 0-5'
-      for selected in "$cleanup_logs" "$all_archives" "$package_caches" "$user_caches" "$all_users" "$guests"; do
-        case "$selected" in true|false) ;; *) fail 'Invalid cleanup checkbox value' ;; esac
-      done
-      [[ $all_archives != true || $cleanup_logs == true ]] || fail 'Deleting all archives requires rotated-log cleanup'
-      [[ $all_users != true || $user_caches == true ]] || fail 'All-user scope requires user cache cleanup'
       aggressive=0
       [[ $all_archives != true ]] || aggressive=1
-      caches=None
-      if [[ $package_caches == true ]]; then caches='Package caches'; fi
-      if [[ $user_caches == true ]]; then
-        caches='Login-user caches'
-        [[ $all_users != true ]] || caches='All-user caches'
-        if [[ $package_caches == true ]]; then
-          caches='Package and login-user caches'
-          [[ $all_users != true ]] || caches='Package and all-user caches'
-        fi
-      fi
       umask 077
       work=$(mktemp -d)
       trap 'rm -rf -- "$work"' EXIT
-      printf '%s\n' "$context" | jq -e '.remaining >= 0 and .remaining <= 16 and (.seen | type == "array")' >/dev/null
-      printf '%s\n' "$context" > "$work/context"
-      identity=$(cat /etc/machine-id 2>/dev/null || true)
-      if [[ $identity =~ ^[0-9a-f]{32}$ ]]; then
-        if jq -e --arg id "$identity" '.seen | index($id) != null' "$work/context" >/dev/null; then
-          printf 'Skipping previously visited guest\nSHUI_LOG_RESULT=%s\n' "$(jq -c . "$work/context")"
-          exit 0
+      if [[ $guests == true ]]; then
+        context=${13-'{"seen":[],"remaining":16}'}
+        printf '%s\n' "$context" | jq -e 'select(.remaining >= 0 and .remaining <= 16 and (.seen | type == "array") and (.seen | all(type == "string" and test("^[0-9a-f]{32}$"))))' > "$work/context"
+        identity=$(cat /etc/machine-id 2>/dev/null || true)
+        if [[ $identity =~ ^[0-9a-f]{32}$ ]]; then
+          if jq -e --arg id "$identity" '.seen | index($id) != null' "$work/context" >/dev/null; then
+            printf 'Skipping previously visited guest\nSHUI_LOG_RESULT=%s\n' "$(jq -c . "$work/context")"
+            exit 0
+          fi
+          jq --arg id "$identity" '.seen += [$id]' "$work/context" > "$work/next"
+          mv "$work/next" "$work/context"
         fi
-        jq --arg id "$identity" '.seen += [$id]' "$work/context" > "$work/next"
-        mv "$work/next" "$work/context"
       fi
 
       # Write beside the destination, validate, then atomically replace it.
@@ -827,7 +967,7 @@ configuration_scripts:
         temporary=$(mktemp "${path}.shui.XXXXXX")
         trap 'rm -f -- "$temporary"' EXIT
         cat > "$temporary"
-        if [[ -e $path ]]; then chmod --reference="$path" "$temporary"; else chmod 644 "$temporary"; fi
+        if [[ -e $path ]]; then chmod "$(stat -c %a "$path")" "$temporary"; else chmod 644 "$temporary"; fi
         if [[ $path == /etc/docker/daemon.json ]] && command -v dockerd >/dev/null; then
           dockerd --validate --config-file "$temporary"
         fi
@@ -841,7 +981,7 @@ configuration_scripts:
         printf '[Journal]\nSystemMaxUse=%s\nRuntimeMaxUse=%s\nMaxRetentionSec=%sday\n' "$disk" "$runtime" "$days" |
           write_config /etc/systemd/journald.conf.d/90-shui-limits.conf
         systemctl restart systemd-journald
-        systemctl is-active --quiet systemd-journald
+        [[ $cleanup_logs == true ]] || return 0
         journalctl --rotate
         if (( aggressive )); then
           journalctl --vacuum-size=1
@@ -881,17 +1021,17 @@ configuration_scripts:
         else
           echo 'WARNING: verify that cron runs logrotate on this host'
         fi
-        logrotate /etc/logrotate.conf
+        if [[ $cleanup_logs == true ]]; then logrotate /etc/logrotate.conf; fi
       }
       container_logs() {
         if command -v docker >/dev/null; then
           config=/etc/docker/daemon.json
           if [[ -e $config ]]; then cat "$config" > "$work/docker"; else echo '{}' > "$work/docker"; fi
-          driver=$(jq -r '."log-driver" // "json-file"' "$work/docker")
+          driver=$(jq -r '."log-driver" // empty' "$work/docker")
+          if [[ -z $driver ]]; then driver=$(docker info --format '{{.LoggingDriver}}'); fi
           case "$driver" in
             json-file|local)
-              jq --arg driver "$driver" --arg size "$file_bytes" --arg count "$backups" '
-                .["log-driver"] = $driver |
+              jq --arg size "$file_bytes" --arg count "$backups" '
                 .["log-opts"] = ((.["log-opts"] // {}) + {"max-size":$size,"max-file":$count})
               ' "$work/docker" | write_config "$config"
               echo 'WARNING: Restart Docker at a suitable time, then recreate existing containers to apply saved defaults; no workloads were restarted' ;;
@@ -900,10 +1040,8 @@ configuration_scripts:
           esac
         fi
         if command -v podman >/dev/null; then
-          printf '[containers]\nlog_driver="k8s-file"\nlog_size_max=%s\n' "$file_bytes" |
+          printf '[containers]\nlog_size_max=%s\n' "$file_bytes" |
             write_config /etc/containers/containers.conf.d/90-shui-logging.conf
-          # Repair directories created with umask 077 by earlier recipes.
-          chmod 755 /etc/containers/containers.conf.d
           echo 'WARNING: Podman limits apply to new containers; existing containers require recreation and user overrides may take precedence'
         fi
       }
@@ -922,35 +1060,58 @@ configuration_scripts:
       }
       archives() {
         [[ $cleanup_logs == true ]] || return 0
+        : > "$work/known-logs"
+        for state in /var/lib/logrotate/status /var/lib/logrotate/logrotate.status; do
+          if [[ -f $state ]]; then sed -n 's/^"\([^"]*\)" [0-9].*/\1/p' "$state" >> "$work/known-logs"; fi
+        done
+        mkdir "$work/archive-directories"
         # GNU find -execdir holds the containing directory open. Delete only
         # basenames from that directory, never through user-controlled parents.
         archive_cleanup=$(cat <<'SH'
       set -euo pipefail
-      backups=$1 cutoff=$2 aggressive=$3
-      stems=() counts=()
+      backups=$1 cutoff=$2 aggressive=$3 work=$4
+      directory="$work/archive-directories/$(stat -c '%d-%i' .)"
+      [[ ! -d $directory ]] || exit 0
+      mkdir "$directory"
+      declare -A counts=()
       find -P . -maxdepth 1 -type f -printf '%T@ %p\0' | sort -z -nr |
       while IFS= read -r -d '' record; do
         modified=${record%% *} file=${record#* }
         [[ $file =~ ^(.+)(\.[1-9][0-9]*|-[0-9]{8})(\.(gz|xz|bz2|zst))?$ ]] || continue
         stem=${BASH_REMATCH[1]}
-        index=0
-        while (( index < ${#stems[@]} )) && [[ ${stems[index]} != "$stem" ]]; do index=$((index + 1)); done
-        stems[index]=$stem
-        count=${counts[index]:-0}
-        counts[index]=$((count + 1))
-        if (( aggressive || count >= backups || ${modified%%.*} < cutoff )); then rm -f -- "$file"; fi
+        count=${counts["$stem"]:-0}
+        counts["$stem"]=$((count + 1))
+        if (( aggressive || count >= backups || ${modified%%.*} < cutoff )); then
+          recognized=false
+          if grep -Fxq "$PWD/${stem#./}" "$work/known-logs"; then recognized=true; fi
+          case "$PWD/${file#./}" in /var/log/libvirt/qemu/*.log.*|/var/log/libvirt/lxc/*.log.*) recognized=true ;; esac
+          if [[ $recognized != true ]]; then
+            answer=
+            printf 'Unknown rotated log: %q\n' "$PWD/${file#./}"
+            if ! { printf 'Delete this unknown rotated log? [y/N]: '; read -r answer; } 2>/dev/null <> /dev/tty; then
+              echo 'WARNING: No confirmation terminal; keeping unknown log.'
+              continue
+            fi
+            case "$answer" in y|Y|yes|YES) ;; *) continue ;; esac
+          fi
+          # Check after confirmation: an earlier snapshot may already be stale.
+          if ! find -L /proc/[0-9]*/fd -maxdepth 1 -ignore_readdir_race -samefile "$file" -print -quit > "$work/open-log" 2>/dev/null || [[ -s $work/open-log ]]; then
+            printf 'Keeping open or unverifiable log: %q\n' "$PWD/$file"
+            continue
+          fi
+          rm -f -- "$file"
+        fi
       done
       SH
         )
         cutoff=$(( $(date +%s) - days * 86400 ))
         find -P /var/log -regextype posix-extended -ignore_readdir_race -name journal -prune -o \
           -type f -regex '.*(\.[1-9][0-9]*|-[0-9]{8})(\.(gz|xz|bz2|zst))?' \
-          -execdir bash -c "$archive_cleanup" -- "$backups" "$cutoff" "$aggressive" {} +
+          -execdir bash -c "$archive_cleanup" -- "$backups" "$cutoff" "$aggressive" "$work" {} +
         echo 'Archive cleanup finished; active and engine-owned container logs are preserved'
       }
       cache_cleanup() {
-        [[ $caches != None ]] || return 0
-        if [[ $caches == Package* ]]; then
+        if [[ $package_caches == true ]]; then
           if command -v apt-get >/dev/null; then
             if (( aggressive )); then apt-get clean; else apt-get autoclean; fi
           elif command -v dnf >/dev/null; then
@@ -961,8 +1122,8 @@ configuration_scripts:
             if (( aggressive )); then pacman -Scc --noconfirm; else pacman -Sc --noconfirm; fi
           elif command -v apk >/dev/null; then apk cache clean; fi
         fi
-        [[ $caches != 'Package caches' ]] || return 0
-        if [[ $caches == *all-user* || $caches == All-user* ]]; then
+        [[ $user_caches == true ]] || return 0
+        if [[ $all_users == true ]]; then
           awk -F: '$3 == 0 || ($3 >= 1000 && $3 < 65534)' /etc/passwd > "$work/users"
         else
           getent passwd "${SUDO_USER:-root}" > "$work/users"
@@ -981,7 +1142,6 @@ configuration_scripts:
       SH
         )
         while IFS=: read -r user _password uid _gid _comment home _shell; do
-          [[ -d $home ]] || continue
           # Drop privileges before touching any user-controlled cache paths.
           if [[ $uid == 0 ]]; then
             bash -c "$cache_script" -- "$home" "$days" "$aggressive"
@@ -1019,7 +1179,7 @@ configuration_scripts:
             continue
           fi
           request=$(jq -nc --args '{execute:"guest-exec",arguments:{path:"/bin/sh",arg:$ARGS.positional,"capture-output":true}}' \
-            -- -c "$bootstrap" -- "$bootstrap" "$source" "${child[@]}" "$(cat "$work/context")")
+            -- -c "$bootstrap" -- "$bootstrap" "$source" "$packages" "${child[@]}" "$(cat "$work/context")")
           if ! pid=$(agent "$request" | jq -er '.pid'); then uncertain_guest "Guest $domain execution could not be confirmed"; fi
           request=$(jq -nc --argjson pid "$pid" '{execute:"guest-exec-status",arguments:{pid:$pid}}')
           end=$((SECONDS + 180))
@@ -1061,11 +1221,12 @@ configuration_scripts:
         set -e
         if (( status == 0 )); then echo "OK: $action"; else echo "FAILED: $action" >&2; failures=$((failures + 1)); fi
       done
-      printf 'SHUI_LOG_RESULT=%s\n' "$(jq -c . "$work/context")"
+      if [[ $guests == true ]]; then printf 'SHUI_LOG_RESULT=%s\n' "$(jq -c . "$work/context")"; fi
       (( failures == 0 )) || fail 'Incomplete log maintenance'
   - name: Configure firewall
+    packages: *install_packages
     command: port=%p; exec ssh ${port:+-p "$port"} -tt -- %h %{remote}
-    remote: sh -c %{prepare} -- %{script} %{firewall} %{input:ssh_ips} %{input:ports}
+    remote: sh -c %{prepare} -- %{script} %{firewall} %{input:ssh_ips} %{input:ports} %{packages}
     prepare: |
       set -eu
       # Use the server-side SSH port, including SSH-config aliases and NAT.
@@ -1074,8 +1235,9 @@ configuration_scripts:
       port=${connection##* }
       script=$1
       shift
-      if [ "$(id -u)" = 0 ]; then exec sh -c "$script" -- "$@" "$port"; fi
-      exec sudo sh -c "$script" -- "$@" "$port"
+      packages=$4
+      if [ "$(id -u)" = 0 ]; then exec sh -c "$script" -- "$1" "$2" "$3" "$port" "$packages"; fi
+      exec sudo sh -c "$script" -- "$1" "$2" "$3" "$port" "$packages"
     inputs:
       - id: ssh_ips
         type: promptString
@@ -1093,15 +1255,19 @@ configuration_scripts:
       set -eu
       . /etc/os-release
       test -d /run/systemd/system || { echo 'This firewall recipe requires a running systemd host.' >&2; exit 1; }
+      if ! command -v ip >/dev/null; then
+        case " $ID ${ID_LIKE:-} " in *' fedora '*|*' rhel '*|*' rocky '*) package=iproute ;; *) package=iproute2 ;; esac
+        sh -c "$5" -- "$package"
+      fi
+      sh -c "$1" -- validate "$2" "$3" "$4"
       case " $ID ${ID_LIKE:-} " in
         *' debian '*|*' ubuntu '*)
           backend=ufw
           if systemctl is-active --quiet firewalld; then echo 'firewalld is already active; refusing to enable UFW alongside it.' >&2; exit 1; fi
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y ufw iproute2 ;;
-        *' fedora '*|*' rhel '*|*' rocky '*) backend=firewalld; dnf install -y firewalld iproute ;;
-        *' suse '*|*' opensuse-tumbleweed '*) backend=firewalld; zypper --non-interactive install firewalld iproute2 ;;
-        *' arch '*) backend=firewalld; pacman -S --needed --noconfirm firewalld iproute2 ;;
+          if ! command -v ufw >/dev/null; then sh -c "$5" -- ufw; fi ;;
+        *' fedora '*|*' rhel '*|*' rocky '*|*' suse '*|*' opensuse-tumbleweed '*|*' arch '*)
+          backend=firewalld
+          if ! command -v firewall-cmd >/dev/null; then sh -c "$5" -- firewalld; fi ;;
         *) echo "Unsupported firewall installer for $ID." >&2; exit 1 ;;
       esac
       exec sh -c "$1" -- "$backend" "$2" "$3" "$4"
@@ -1136,15 +1302,58 @@ configuration_scripts:
           fail 'Configure SSH access with SSH allowed IPs, not the port whitelist'
         fi
       done
+      [ "$backend" != validate ] || exit 0
       umask 077
       work=$(mktemp -d)
       trap 'rm -rf -- "$work"' 0
       if [ "$backend" = ufw ]; then
         [ ! -L /etc/default/ufw ] || fail 'Refusing symlinked UFW configuration'
-        # The whitelist replaces prior UFW rules, rather than adding exceptions.
-        ufw --force reset
+        [ ! -L /etc/ufw ] || fail 'Refusing symlinked UFW directory'
+        cp -a /etc/ufw "$work/ufw"
+        cp -p /etc/default/ufw "$work/default-ufw"
+        previous_active=false
+        previous_status=$(LC_ALL=C ufw status)
+        case "$previous_status" in
+          'Status: active'*) previous_active=true ;;
+          'Status: inactive'*) ;;
+          *) fail 'Cannot determine the current UFW state; no rules were changed' ;;
+        esac
+        previous_enabled=false
+        if systemctl is-enabled --quiet ufw; then previous_enabled=true; fi
+        rollback_ufw() {
+          status=$?
+          trap - 0
+          set +e
+          if [ "$status" -ne 0 ]; then
+            echo 'Firewall setup failed; restoring previous UFW configuration.' >&2
+            restored=true
+            cp -a "$work/ufw/." /etc/ufw/ || restored=false
+            cp -p "$work/default-ufw" /etc/default/ufw || restored=false
+            if [ "$previous_active" = true ]; then ufw --force enable || restored=false; else ufw --force disable || restored=false; fi
+            if [ "$previous_enabled" = true ]; then systemctl enable ufw || restored=false; else systemctl disable ufw || restored=false; fi
+            if [ "$restored" != true ]; then
+              echo "WARNING: UFW restoration failed. Backups retained in $work; restore protection manually." >&2
+              exit "$status"
+            fi
+          fi
+          rm -rf -- "$work"
+          exit "$status"
+        }
+        trap rollback_ufw 0
+        trap 'exit 1' HUP INT TERM
         sed -i 's/^IPV6=.*/IPV6=yes/' /etc/default/ufw
         grep -q '^IPV6=yes$' /etc/default/ufw || printf '\nIPV6=yes\n' >> /etc/default/ufw
+        # UFW lists numbered rules only while active; keep outgoing/forwarded rules.
+        ufw --force enable
+        LC_ALL=C ufw status numbered > "$work/rules"
+        awk '
+          /^\[[[:space:]]*[0-9]+\]/ {
+            sub(/ # .*/, "")
+            if ($0 !~ /[[:space:]](ALLOW|DENY|REJECT|LIMIT)[[:space:]]+IN[[:space:]]/) next
+            sub(/^\[[[:space:]]*/, ""); sub(/\].*/, ""); print
+          }
+        ' "$work/rules" | sort -rn > "$work/incoming"
+        while read -r number; do ufw --force delete "$number"; done < "$work/incoming"
         if [ -n "$sources" ]; then
           ufw prepend deny in proto tcp to any port "$ssh" comment shui-ssh
         fi
@@ -1157,8 +1366,6 @@ configuration_scripts:
           ufw allow "$range/$protocol"
         done
         ufw default deny incoming
-        ufw default allow outgoing
-        ufw --force enable
         systemctl enable ufw
         ufw status verbose
       else
@@ -1206,6 +1413,7 @@ configuration_scripts:
         while IFS= read -r zone; do firewall-cmd --zone="$zone" --list-all; done < "$work/zones"
       fi
   - name: Copy terminal definition
+    packages: *install_packages
     available_command: command -v ssh && command -v infocmp && test -n "${TERM:-}"
     # Export before connecting so a failed infocmp cannot send a partial definition.
     command: sh -c %{export_script} -- %h %p %{ensure_remote} %{remote}
@@ -1216,21 +1424,18 @@ configuration_scripts:
       # Keep installation/password prompts on the terminal, not definition stdin.
       ssh ${port:+-p "$port"} -tt -- "$1" "$3"
       printf '%s\n' "$definition" | ssh ${port:+-p "$port"} -- "$1" "$4"
-    ensure_remote: sh -c %{ensure_tic}
+    ensure_remote: sh -c %{ensure_tic} -- %{packages}
     ensure_tic: |
       set -eu
       command -v tic >/dev/null 2>&1 && exit 0
       root() { if [ "$(id -u)" = 0 ]; then "$@"; else sudo "$@"; fi; }
       . /etc/os-release
       case " $ID ${ID_LIKE:-} " in
-        *' debian '*|*' ubuntu '*) root apt-get update; root env DEBIAN_FRONTEND=noninteractive apt-get install -y ncurses-bin ;;
-        *' fedora '*|*' rhel '*|*' rocky '*) root dnf install -y ncurses ;;
-        *' suse '*|*' opensuse-tumbleweed '*) root zypper --non-interactive install ncurses-devel ncurses-utils ;;
-        *' arch '*) root pacman -S --needed --noconfirm ncurses ;;
-        *' alpine '*) root apk add ncurses ;;
+        *' debian '*|*' ubuntu '*) root sh -c "$1" -- ncurses-bin ;;
+        *' suse '*|*' opensuse-tumbleweed '*) root sh -c "$1" -- ncurses-devel ;;
+        *' fedora '*|*' rhel '*|*' rocky '*|*' arch '*|*' alpine '*) root sh -c "$1" -- ncurses ;;
         *) echo "No supported tic package installer for $ID" >&2; exit 1 ;;
       esac
-      command -v tic >/dev/null
     remote: sh -c %{script}
     script: |
       set -eu

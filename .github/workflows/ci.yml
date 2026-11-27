@@ -13,7 +13,7 @@ jobs:
       - name: Build Wine test environment
         run: docker build -t shui-wine-tests -f tests/wine.Dockerfile .
       - name: Test Windows binary and shell execution under Wine
-        run: docker run --rm --mount "type=bind,src=$PWD,dst=/src,readonly" shui-wine-tests
+        run: docker run --rm --init --mount "type=bind,src=$PWD,dst=/src,readonly" shui-wine-tests
 
   test-and-build:
     runs-on: ubuntu-latest

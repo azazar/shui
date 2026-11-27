@@ -60,11 +60,10 @@ keybindings:
 
 profiles:
   - name: Work
-    command: port=%p; exec ssh ${port:+-p "$port"} -tt -- %h %{remote}
-    remote: bash -c %{script}
-    script: |
-      ~/bin/work-session.sh
-      exec bash -l
+    shell: direct
+    command: ssh -tt -- %h %{remote}
+    port_args: [-p, '%p']
+    remote: bash -c '~/bin/work-session.sh; exec bash -l'
   - name: Remote command
     command: ssh %h %{input:remote}
     inputs:

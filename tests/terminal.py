@@ -12,6 +12,7 @@ import signal
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import termios
 import time
@@ -625,7 +626,12 @@ with tempfile.TemporaryDirectory(prefix="shui-pty-") as directory:
                 last_key_start = len(output)
                 os.write(master, key)
                 read_for(0.1)
-            wait_pty(process, master, 3, receive)
+            try:
+                wait_pty(process, master, 3, receive)
+            except subprocess.TimeoutExpired as error:
+                raise AssertionError(
+                    f"Session did not finish for {keys!r}; terminal tail: {bytes(output[-6000:])!r}"
+                ) from error
             assert process.returncode == expected_status, output
             assert termios.tcgetattr(slave) == before, (
                 "terminal settings were not restored"
@@ -747,7 +753,10 @@ with tempfile.TemporaryDirectory(prefix="shui-pty-") as directory:
     # A missing final newline must not merge our entry into a previous command.
     (root / ".bash_history").write_text("echo previous")
     session([b"alpha", b"\r"])
-    assert (root / ".bash_history").read_text().splitlines()[0] == "echo previous"
+    assert (root / ".bash_history").read_text().splitlines() == [
+        "echo previous",
+        "ssh -- alpha",
+    ]
     # An unusable history file must not block an otherwise valid connection.
     (root / ".bash_history").unlink()
     (root / ".bash_history").mkdir()
@@ -786,10 +795,10 @@ with tempfile.TemporaryDirectory(prefix="shui-pty-") as directory:
     session([b"beta:2222", b"\x1b[C", b"\r"])  # Bash -> Zellij
     command = (root / "command").read_text().splitlines()
     assert command[1:6] == ["-p", "2222", "-tt", "--", "beta"], command
-    # SSH receives just the remote application command, without bootstrap code.
+    # The interactive SSH launch prepares the remote before invoking Zellij.
     remote_command = "\n".join(command[6:])
     assert "attach --create" in remote_command
-    # Execute the actual encoded remote command with an existing mock Zellij.
+    # Execute the remote command with an existing mock Zellij.
     zellij = root / "bin/zellij"
     zellij.write_text(
         '#!/bin/sh\nprintf "%s\\n" "$@" > "$SHUI_TEST_LOG.zellij"\nread -r line; [ "$line" = terminal-input ]\n'
@@ -817,6 +826,17 @@ with tempfile.TemporaryDirectory(prefix="shui-pty-") as directory:
         [b"beta:2222", b"\r"]
     )  # Zellij is restored from the single-line history entry.
     assert "\n".join((root / "command").read_text().splitlines()[6:]) == remote_command
+    entry = (root / ".bash_history").read_text().splitlines()[-1]
+    usage = "zellij attach --create options --show-startup-tips false --show-release-notes false"
+    assert entry == f"ssh -p 2222 -tt -- beta '{usage}'"
+    subprocess.run(
+        ["bash", "-c", entry],
+        env=child_env,
+        capture_output=True,
+        check=True,
+        timeout=10,
+    )
+    assert (root / "command").read_text().splitlines()[6:] == [usage]
     # New direct shortcuts and input-bearing forwarding profiles use normal handoff.
     session([b"beta:2222", b"\x1bt"])
     command = (root / "command").read_text().splitlines()
@@ -835,14 +855,18 @@ with tempfile.TemporaryDirectory(prefix="shui-pty-") as directory:
         (b"\x1b[108;7u", "-L", "127.0.0.1:8080:localhost:80"),
         (b"\x1b[100;7u", "-D", "127.0.0.1:1080"),
     ]:
+        history = (root / ".bash_history").read_text()
         session([b"beta:2222", key, b"\r"])
+        assert (root / ".bash_history").read_text() == history
         args = (root / "command").read_text().splitlines()[1:]
         assert args[:4] == ["-p", "2222", "-N", "-T"], args
         assert args[-4:] == [flag, value, "--", "beta"], args
     config_file.write_text("""default: Script
 profiles:
   - name: Script
-    command: port=%p; exec ssh ${port:+-p "$port"} -tt -- %h %{remote}
+    shell: direct
+    command: ssh -tt -- %h %{remote}
+    port_args: [-p, '%p']
     remote: exec bash -lc '~/bin/work.sh; exec bash -l'
   - name: Custom
     command: custom-connect %h %p %{value}
@@ -861,6 +885,17 @@ profiles:
     command = (root / "command").read_text().splitlines()
     assert command[0].endswith("/custom-connect"), command
     assert command[1:] == ["beta", "2222", "literal ; $HOME"], command
+    entry = (root / ".bash_history").read_text().splitlines()[-1]
+    assert entry == "custom-connect beta 2222 'literal ; $HOME'"
+    (root / "command").unlink()
+    subprocess.run(
+        ["bash", "-c", entry],
+        env=child_env,
+        capture_output=True,
+        check=True,
+        timeout=10,
+    )
+    assert (root / "command").read_text().splitlines() == command
     session([b"beta:2222", b"\r"])  # Custom argv is restored too.
     assert (root / "command").read_text().splitlines()[0].endswith("/custom-connect")
     config_file.write_text("profiles: [")
@@ -900,7 +935,10 @@ profiles:
         stub.chmod(0o755)
     ssh = root / "bin/ssh"
     original_ssh = ssh.read_text()
-    ssh.write_text(original_ssh + 'printf "%s\\n" "$@" >> "$SHUI_TEST_LOG.calls"\n')
+    ssh.write_text(
+        original_ssh
+        + 'printf "%s\\n" "$@" >> "$SHUI_TEST_LOG.calls"\ncase "$*" in *"tar -xf"*) cat > "$SHUI_TEST_LOG.archive" ;; esac\n'
+    )
     session([ADD_REMOTE, b"setup@example.org:2200", b"\t", b" ", b"\r"])
     key_calls = (root / "command.calls").read_text()
     assert "authorized_keys" in key_calls and "fingerprint=" in key_calls
@@ -910,14 +948,11 @@ profiles:
     (root / "command.calls").unlink()
     session([ADD_REMOTE, b"dotfiles@example.org:2201", b"\t", b"\t", b" ", b"\r"])
     assert not (root / "command.ssh-copy-id").exists()
-    assert (root / "command.scp").read_text().splitlines() == [
-        "-P",
-        "2201",
-        "-r",
-        str(root / "src/dotfiles") + "/.",
-        "dotfiles@example.org:src/dotfiles/",
-    ]
+    assert not (root / "command.scp").exists()
+    with tarfile.open(root / "command.archive") as archive:
+        assert "./install.sh" in archive.getnames()
     dotfiles_calls = (root / "command.calls").read_text()
+    assert "-p\n2201\n" in dotfiles_calls
     assert "-i" not in dotfiles_calls.splitlines()
     ssh.write_text(original_ssh)
     # Adding a remote persists through ordinary history, even if no history existed.
@@ -943,13 +978,16 @@ profiles:
     )
     stub.chmod(0o755)
     config_file.write_text("""default: SSH
-profiles: [{name: SSH, command: 'ssh -- %h'}]
+profiles: [{name: SSH, shell: direct, command: 'ssh -- %h', port_args: [-p, '%p']}]
 configuration_scripts:
   - name: Test setup
     command: setup-test %h %p %{value}
     value: literal ; $HOME
 """)
     session([ADD_REMOTE, b"added:2222", b"\t", b" ", b"\r"])
+    assert (root / ".bash_history").read_text().splitlines()[
+        -1
+    ] == "ssh -p 2222 -- added"
     assert (root / "command.setup").read_text().splitlines() == [
         "added",
         "2222",
@@ -1279,6 +1317,18 @@ configuration_scripts:
     session([b"help-host:2222", b"\r", (b"Install test dependency? [y/N] ",), b"y\n"])
     assert (root / "command").read_text().splitlines()[1:] == ["--", "help-host"]
     assert "prepare-test" not in (root / ".bash_history").read_text()
+    config_file.write_text("""default: Work
+profiles:
+  - name: Work
+    shell: direct
+    command: sh -c %{remote} -- %h
+    prepare_remote: exit 7
+    remote: 'touch "$HOME/unprepared"'
+""")
+    before = (root / ".bash_history").read_text()
+    session([b"alpha", b"\r"], expected_status=7)
+    assert (root / ".bash_history").read_text() == before
+    assert not (root / "unprepared").exists()
     # Launch availability is evaluated once at load, before history and navigation.
     config_file.write_text("""default: Missing
 profiles:
@@ -1629,6 +1679,7 @@ printf 'generated public key' > "$private.pub"
     ssh.write_text(
         original_ssh
         + 'case "$*" in *authorized_keys*) printf "%s\\n" "$@" >> "$SHUI_TEST_LOG.key-copy" ;; esac\n'
+        + 'case "$*" in *"tar -xf"*) cat > "$SHUI_TEST_LOG.archive" ;; esac\n'
     )
     for keyfile in (root / ".ssh").glob("id_*"):
         keyfile.unlink()
@@ -1675,13 +1726,9 @@ printf 'generated public key' > "$private.pub"
     session([ADD_REMOTE, b"generated-dotfiles:2202", b"\t", b"\t", b" ", b"\r"])
     assert not (root / "command.keygen").exists()
     assert not (root / "command.ssh-copy-id").exists()
-    assert (root / "command.scp").read_text().splitlines() == [
-        "-P",
-        "2202",
-        "-r",
-        str(root / "src/dotfiles") + "/.",
-        "generated-dotfiles:src/dotfiles/",
-    ]
+    assert not (root / "command.scp").exists()
+    with tarfile.open(root / "command.archive") as archive:
+        assert "./install.sh" in archive.getnames()
     # Queued recipes run in configuration order; a failure prevents later work
     # and the connection, even when recipes were checked in reverse order.
     config_file.write_text("""default: SSH

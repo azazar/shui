@@ -6,8 +6,16 @@ use std::{
 };
 fn main() {
     let args: Vec<_> = env::args().collect();
-    let mut input = String::new();
-    std::io::stdin().read_to_string(&mut input).unwrap();
+    let mut input = Vec::new();
+    std::io::stdin().read_to_end(&mut input).unwrap();
+    let input = if args.iter().any(|arg| arg.contains("tar -xf -")) {
+        input
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    } else {
+        String::from_utf8(input).unwrap()
+    };
     let mut log = OpenOptions::new()
         .create(true)
         .append(true)

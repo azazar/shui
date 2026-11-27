@@ -13,7 +13,13 @@ import textwrap
 repo = Path(__file__).resolve().parents[1]
 config = (repo / "docs/config.example.yml").read_text()
 block = config.split("  - name: Zellij\n", 1)[1].split("  - name:", 1)[0]
-source = textwrap.dedent(block.split("    script: |\n", 1)[1])
+remote = block.split("    remote: ", 1)[1].splitlines()[0]
+source = (
+    "set -e\n"
+    + textwrap.dedent(block.split("    prepare_remote: |\n", 1)[1])
+    + "\n"
+    + remote
+)
 
 with tempfile.TemporaryDirectory(prefix="shui-zellij-test-") as directory:
     root = Path(directory)
